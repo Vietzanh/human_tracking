@@ -5,9 +5,11 @@ perf-measurement-interval-sec=5
 [source0]
 enable=1
 type=4
-uri=rtsp://localhost:8554/input
+uri=rtsp://127.0.0.1:8554/input_stream
 num-sources=1
 gpu-id=0
+latency=200
+select-rtp-protocol=4
 
 [streammux]
 batch-size=1
@@ -24,9 +26,9 @@ config-file=pgie_config.txt
 [tracker]
 enable=1
 tracker-width=1920
-tracker-height=1080
-ll-lib-file=/opt/nvidia/deepstream/deepstream/lib/libnvds_nvdcf.so
-ll-config-file=tracker_config.txt
+tracker-height=1088
+ll-lib-file=/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+ll-config-file=/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml
 gpu-id=0
 
 [osd]
@@ -37,5 +39,18 @@ text-size=15
 
 [sink0]
 enable=1
-type=2
+type=4
+codec=1
+bitrate=4000000
+rtsp-port=8556
+udp-port=5400
+sync=0
+
+[sink1]
+enable=1
+type=3
+container=1
+codec=1
+bitrate=4000000
+output-file=output.mp4
 sync=0

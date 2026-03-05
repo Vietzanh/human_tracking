@@ -3,11 +3,15 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.so
 
 # Virtual environment
 .venv/
 env/
 venv/
+
+# Jupyter
+.ipynb_checkpoints/
 
 # Distribution
 build/
@@ -17,9 +21,40 @@ dist/
 # Logs
 *.log
 
+# Video/media
+*.mp4
+*.avi
+*.mkv
+*.mov
+
 # IDE
 .vscode/
 .idea/
 
 # OS
 .DS_Store
+
+# Model files
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# DeepStream build files
+*.so
+*.o
+*.a
+
+# Dataset/runs
+runs/
+data/
+
+# VSCode
+.vscode/
+
+# Large downloaded packages
+*.tar.gz
+
+# OS files
+.DS_Store
+Thumbs.db

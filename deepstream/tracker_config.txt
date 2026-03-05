@@ -1,0 +1,22 @@
+BaseConfig:
+  minDetectorConfidence: 0.25
+  maxTargetsPerStream: 150
+
+TargetManagement:
+  maxShadowTrackingAge: 60
+  probationAge: 3
+  earlyTerminationAge: 1
+
+TrajectoryManagement:
+  useUniqueID: 1
+
+DataAssociator:
+  dataAssociationType: 0
+  associationMatcherType: 0
+  checkClassMatch: 1
+
+StateEstimator:
+  stateEstimatorType: 0
+
+VisualTracker:
+  visualTrackerType: 1
