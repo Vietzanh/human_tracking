@@ -163,18 +163,15 @@ def main():
     # [tracker] – dùng NvDCF_perf.yml, width=1920, height=1088
     tracker.set_property("ll-lib-file",
         "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so")
-    tracker.set_property("ll-config-file",
-        "/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml")
+    tracker.set_property("ll-config-file", "../deepstream/tracker_config.txt")
     tracker.set_property("tracker-width",  1920)
     tracker.set_property("tracker-height", 1088)
 
     # Encoder (bitrate=4000000 khớp cả 2 sink)
     encoder.set_property("bitrate", 4000000)
 
-    # [sink0] RTSP – port 8556, udp-port 5400
-    rtsp_sink.set_property("port",     8556)
-    rtsp_sink.set_property("udp-port", 5400)
-    rtsp_sink.set_property("sync",     False)
+    # [sink0] RTSP – DeepStream 7.0: nvrtspoutsinkbin chỉ expose rtsp-port
+    rtsp_sink.set_property("rtsp-port", 8556)
 
     # [sink1] File
     filesink.set_property("location", "output.mp4")
