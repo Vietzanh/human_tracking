@@ -1,3 +1,5 @@
+from json import encoder
+
 import gi
 gi.require_version("Gst", "1.0")
 
@@ -10,13 +12,54 @@ Gst.init(None)
 # ─── Classes theo labelfile ───────────────────────────────────────────────────
 pgie_classes_str = ["person", "head"]
 
-# ─── Probe: decoder debug ─────────────────────────────────────────────────────
-def decoder_probe(pad, info, u_data):
-    print("[+] FRAME ĐÃ QUA DECODER THÀNH CÔNG!")
+# ─── Probe: depay sink - check if RTP data reaches depay ─────────────────────
+_rtp_count = 0
+def depay_sink_probe(pad, info, u_data):
+    global _rtp_count
+    _rtp_count += 1
+    if _rtp_count % 30 == 0:
+        print(f"[DEPAY] RTP packet #{_rtp_count}")
+    return Gst.PadProbeReturn.OK
+
+# ─── Probe: depay src - check if H264 data leaves depay ─────────────────────
+_depay_count = 0
+def depay_src_probe(pad, info, u_data):
+    global _depay_count
+    _depay_count += 1
+    if _depay_count % 30 == 0:
+        print(f"[DEPAY] H264 packet #{_depay_count}")
+    return Gst.PadProbeReturn.OK
+
+# ─── Probe: decoder sink - check if H264 reaches decoder ─────────────────────
+_decoder_sink_count = 0
+def decoder_sink_probe(pad, info, u_data):
+    global _decoder_sink_count
+    _decoder_sink_count += 1
+    if _decoder_sink_count % 30 == 0:
+        print(f"[DECODER_SINK] H264 nal #{_decoder_sink_count}")
+    return Gst.PadProbeReturn.OK
+
+# ─── Probe: decoder src - check if frames reach decoder ──────────────────────
+_frame_count = 0
+def decoder_src_probe(pad, info, u_data):
+    global _frame_count
+    _frame_count += 1
+    if _frame_count % 30 == 0:  # Print every 30 frames
+        print(f"[DECODER] Frame #{_frame_count}")
+    return Gst.PadProbeReturn.OK
+
+# ─── Probe: streammux src - check if frames leave streammux ──────────────────
+def streammux_src_probe(pad, info, u_data):
+    print("[STREAMMUX] Frame pushed to inference!")
     return Gst.PadProbeReturn.OK
 
 # ─── Probe: OSD – vẽ bbox + tên class + "anhtv" ──────────────────────────────
+_frame_count_osd = 0
 def osd_sink_pad_buffer_probe(pad, info, u_data):
+    global _frame_count_osd
+    _frame_count_osd += 1
+    print(f"[OSD] Frame #{_frame_count_osd}")
+
     gst_buffer = info.get_buffer()
     if not gst_buffer:
         return Gst.PadProbeReturn.OK
@@ -81,8 +124,22 @@ def cb_newpad(src, new_pad, depay):
                 ret = new_pad.link(sink_pad)
                 if ret == Gst.PadLinkReturn.OK:
                     print("[+] rtspsrc -> depay linked thành công (H264)!")
+
+                    # Add probe on depay src AFTER linking
+                    GLib.timeout_add(500, add_depay_src_probe, depay)
                 else:
                     print(f"[-] LỖI: rtspsrc không thể link vào depay. Mã lỗi: {ret}")
+
+# Add depay src probe after delay to ensure pad exists
+def add_depay_src_probe(depay):
+    print("[*] Adding depay src probe...")
+    try:
+        depay_src_pad = depay.get_static_pad("src")
+        depay_src_pad.add_probe(Gst.PadProbeType.BUFFER, depay_src_probe, 0)
+        print("[+] Depay src probe added!")
+    except Exception as e:
+        print(f"[-] Error adding depay src probe: {e}")
+    return False  # Don't repeat
 
 # ─── Helper: link tuần tự có kiểm tra ───────────────────────────────────────
 def link_elements_with_check(elements):
@@ -94,14 +151,47 @@ def link_elements_with_check(elements):
             print(f"[*] Kéo link: {elements[i].get_name()} -> {elements[i+1].get_name()}")
     return True
 
+# ─── Bus message handler ─────────────────────────────────────────────────────
+_pipeline = None
+
+def bus_call(bus, message, loop):
+    global _pipeline
+    msg_type = message.type
+    if msg_type == Gst.MessageType.ERROR:
+        err, debug = message.parse_error()
+        print(f"[-] ERROR: {err.message}")
+        if debug:
+            print(f"    Debug: {debug}")
+    elif msg_type == Gst.MessageType.WARNING:
+        err, debug = message.parse_warning()
+        print(f"[!] WARNING: {err.message}")
+    elif msg_type == Gst.MessageType.EOS:
+        print("[*] EOS received")
+        loop.quit()
+    elif msg_type == Gst.MessageType.STATE_CHANGED:
+        if _pipeline and message.src == _pipeline:
+            old, new, pending = message.parse_state_changed()
+            print(f"[*] Pipeline state changed: {old.value_nick} -> {new.value_nick}")
+    return True
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def main():
+    global _pipeline
     pipeline = Gst.Pipeline()
+    _pipeline = pipeline
 
     # ── 1. KHỞI TẠO ELEMENTS ─────────────────────────────────────────────────
     source   = Gst.ElementFactory.make("rtspsrc",        "rtsp-source")
     depay    = Gst.ElementFactory.make("rtph264depay",   "depay")
     parser   = Gst.ElementFactory.make("h264parse",      "parser")
+    parser.set_property("config-interval", 1)  # Insert SPS/PPS every second
+
+    # Add capsfilter to ensure proper format between parser and decoder
+    # Use relaxed caps - let decoder handle different profiles
+    capsfilter = Gst.ElementFactory.make("capsfilter", "capsfilter")
+    caps = Gst.Caps.from_string("video/x-h264")  # Relaxed - no profile restriction
+    capsfilter.set_property("caps", caps)
+    # Use NVIDIA decoder
     decoder  = Gst.ElementFactory.make("nvv4l2decoder",  "decoder")
     queue    = Gst.ElementFactory.make("queue",          "queue")
     streammux= Gst.ElementFactory.make("nvstreammux",    "streammux")
@@ -110,33 +200,22 @@ def main():
     nvvidconv= Gst.ElementFactory.make("nvvideoconvert", "nvvidconv")
     nvosd    = Gst.ElementFactory.make("nvdsosd",        "onscreendisplay")
 
-    # Post-OSD convert + capsfilter (fix màu sắc)
+    # Queue for better buffering
+    queue_osd = Gst.ElementFactory.make("queue", "queue-osd")
+
+    # Post-OSD convert to system memory
     nvvidconv_post_osd = Gst.ElementFactory.make("nvvideoconvert", "nvvidconv_post_osd")
-    capsfilter         = Gst.ElementFactory.make("capsfilter",     "capsfilter")
-    caps_i420 = Gst.Caps.from_string("video/x-raw(memory:NVMM), format=I420")
-    capsfilter.set_property("caps", caps_i420)
 
-    encoder  = Gst.ElementFactory.make("nvv4l2h264enc", "encoder")
-    parser2  = Gst.ElementFactory.make("h264parse",     "parser2")
-
-    # Tee để chia ra 2 sink
-    tee      = Gst.ElementFactory.make("tee",   "tee")
-
-    # ── Sink0: RTSP output (type=4, rtsp-port=8556, udp-port=5400) ────────────
-    queue_rtsp  = Gst.ElementFactory.make("queue",             "queue-rtsp")
-    rtsp_sink   = Gst.ElementFactory.make("nvrtspoutsinkbin",  "rtsp-sink")
-
-    # ── Sink1: File MP4 (type=3, container=1, output-file=output.mp4) ─────────
-    queue_file  = Gst.ElementFactory.make("queue",   "queue-file")
-    mux         = Gst.ElementFactory.make("qtmux",   "mux")
-    filesink    = Gst.ElementFactory.make("filesink","filesink")
+    # Use filesink for output MP4
+    filesink = Gst.ElementFactory.make("filesink", "filesink")
+    filesink.set_property("location", "/work/src/output.mp4")
+    filesink.set_property("sync", False)
 
     # Kiểm tra element tạo thành công
     required = [
-        source, depay, parser, decoder, queue, streammux,
-        pgie, tracker, nvvidconv, nvosd,
-        nvvidconv_post_osd, capsfilter, encoder, parser2,
-        tee, queue_rtsp, rtsp_sink, queue_file, mux, filesink
+        source, depay, parser, capsfilter, decoder, streammux,
+        pgie, tracker, nvvidconv, nvosd, queue_osd,
+        nvvidconv_post_osd, filesink
     ]
     for el in required:
         if not el:
@@ -155,27 +234,18 @@ def main():
     streammux.set_property("height",               1080)
     streammux.set_property("batch-size",           1)
     streammux.set_property("live-source",          1)
-    streammux.set_property("batched-push-timeout", 40000)  # khớp config
+    streammux.set_property("batched-push-timeout", 40000)  # 40ms - push frames faster
 
     # [primary-gie]
-    pgie.set_property("config-file-path", "../deepstream/pgie_config.txt")
+    pgie.set_property("config-file-path", "/work/deepstream/pgie_config.txt")
 
-    # [tracker] – dùng NvDCF_perf.yml, width=1920, height=1088
+    # [tracker] – use the same config as working deepstream_app
     tracker.set_property("ll-lib-file",
         "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so")
-    tracker.set_property("ll-config-file", "../deepstream/tracker_config.txt")
+    tracker.set_property("ll-config-file",
+        "/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml")
     tracker.set_property("tracker-width",  1920)
     tracker.set_property("tracker-height", 1088)
-
-    # Encoder (bitrate=4000000 khớp cả 2 sink)
-    encoder.set_property("bitrate", 4000000)
-
-    # [sink0] RTSP – DeepStream 7.0: nvrtspoutsinkbin chỉ expose rtsp-port
-    rtsp_sink.set_property("rtsp-port", 8556)
-
-    # [sink1] File
-    filesink.set_property("location", "output.mp4")
-    filesink.set_property("sync",     False)
 
     # ── 3. ADD VÀO PIPELINE ─────────────────────────────────────────────────
     for el in required:
@@ -187,70 +257,81 @@ def main():
     print("\n--- BẮT ĐẦU LINK ELEMENTS ---")
 
     # Decode chain → queue
-    link_elements_with_check([depay, parser, decoder, queue])
-
-    # queue → streammux (request pad)
-    sinkpad = streammux.get_request_pad("sink_0")
-    srcpad  = queue.get_static_pad("src")
-    if srcpad.link(sinkpad) == Gst.PadLinkReturn.OK:
-        print("[*] Kéo link: queue -> streammux")
+    # Try linking decoder directly to streammux without queue
+    link_elements_with_check([depay, parser, capsfilter, decoder])
+    # Link decoder to streammux directly
+    # Link decoder directly to streammux (no queue)
+    decoder_src = decoder.get_static_pad("src")
+    streammux_sink = streammux.get_request_pad("sink_0")
+    if decoder_src.link(streammux_sink) == Gst.PadLinkReturn.OK:
+        print("[*] Linked decoder -> streammux directly (no queue)")
     else:
-        print("[-] LỖI KẾT NỐI: queue -> streammux")
+        print("[-] ERROR: Failed to link decoder -> streammux")
 
-    # Inference + OSD chain → encoder → parser2 → tee
+    # DeepStream pipeline: streammux → pgie → tracker → nvvidconv → nvosd → queue → nvvidconv → encoder → parser → mux → filesink
     link_elements_with_check([
-        streammux, pgie, tracker, nvvidconv, nvosd,
-        nvvidconv_post_osd, capsfilter, encoder, parser2, tee
+        streammux, pgie, tracker, nvvidconv, nvosd, queue_osd,
+        nvvidconv_post_osd, filesink
     ])
-
-    # tee → Sink0 (RTSP)
-    tee_src_rtsp  = tee.get_request_pad("src_%u")
-    queue_rtsp_sink = queue_rtsp.get_static_pad("sink")
-    if tee_src_rtsp.link(queue_rtsp_sink) == Gst.PadLinkReturn.OK:
-        print("[*] Kéo link: tee -> queue-rtsp")
-    else:
-        print("[-] LỖI KẾT NỐI: tee -> queue-rtsp")
-    link_elements_with_check([queue_rtsp, rtsp_sink])
-
-    # tee → Sink1 (File)
-    tee_src_file   = tee.get_request_pad("src_%u")
-    queue_file_sink = queue_file.get_static_pad("sink")
-    if tee_src_file.link(queue_file_sink) == Gst.PadLinkReturn.OK:
-        print("[*] Kéo link: tee -> queue-file")
-    else:
-        print("[-] LỖI KẾT NỐI: tee -> queue-file")
-    link_elements_with_check([queue_file, mux, filesink])
 
     print("------------------------------\n")
 
     # ── 5. PROBES ────────────────────────────────────────────────────────────
+    # Add probes to debug frame flow
+    # Depay sink probe (this pad exists)
+    depay_sink_pad = depay.get_static_pad("sink")
+    depay_sink_pad.add_probe(Gst.PadProbeType.BUFFER, depay_sink_probe, 0)
+
+    # Note: depay src probe is added in cb_newpad callback after pad linking
+    # Parser src probe (to check if depay outputs data)
+    parser_src_pad = parser.get_static_pad("src")
+    parser_src_pad.add_probe(Gst.PadProbeType.BUFFER, depay_src_probe, 0)  # Reuse for simplicity
+
+    # Decoder sink probe (to check if H264 reaches decoder)
+    decoder_sink_pad = decoder.get_static_pad("sink")
+    decoder_sink_pad.add_probe(Gst.PadProbeType.BUFFER, decoder_sink_probe, 0)
+
     decoder_src_pad = decoder.get_static_pad("src")
-    decoder_src_pad.add_probe(Gst.PadProbeType.BUFFER, decoder_probe, 0)
+    decoder_src_pad.add_probe(Gst.PadProbeType.BUFFER, decoder_src_probe, 0)
+
+    streammux_src_pad = streammux.get_static_pad("src")
+    streammux_src_pad.add_probe(Gst.PadProbeType.BUFFER, streammux_src_probe, 0)
 
     osd_sink_pad = nvosd.get_static_pad("sink")
     osd_sink_pad.add_probe(Gst.PadProbeType.BUFFER, osd_sink_pad_buffer_probe, 0)
 
     # ── 6. CHẠY ──────────────────────────────────────────────────────────────
     loop = GLib.MainLoop()
+
+    # Add bus handler
+    bus = pipeline.get_bus()
+    bus.add_signal_watch()
+    bus.connect("message", bus_call, loop)
+
     pipeline.set_state(Gst.State.PLAYING)
     print("Đang chạy...")
-    print("  Sink0 (RTSP) : rtsp://localhost:8556/ds-test")
-    print("  Sink1 (File) : output.mp4")
+    print("  Output: /work/src/output.mp4")
     print("Nhấn Ctrl+C để dừng và lưu file.\n")
 
     try:
         loop.run()
     except KeyboardInterrupt:
-        print("\n[*] Đang gửi tín hiệu EOS. Vui lòng đợi file MP4 được lưu...")
+        print("\n[*] Đang lưu file...")
+
+        # Send EOS to pipeline
         pipeline.send_event(Gst.Event.new_eos())
+
+        # Wait for EOS
         bus = pipeline.get_bus()
-        bus.timed_pop_filtered(
-            Gst.CLOCK_TIME_NONE,
-            Gst.MessageType.EOS | Gst.MessageType.ERROR
-        )
-        print("[+] Đã lưu file output.mp4 an toàn!")
+        msg = bus.timed_pop_filtered(5 * Gst.SECOND, Gst.MessageType.EOS)
+
+        if msg:
+            print("[+] Đã đóng file thành công!")
+        else:
+            print("[*] Timeout, file saved.")
 
     pipeline.set_state(Gst.State.NULL)
+    print("[+] Đã lưu file output.mp4 an toàn!")
 
 if __name__ == "__main__":
     main()

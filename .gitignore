@@ -23,20 +23,9 @@ dist/
 
 # OS
 .DS_Store
-Thumbs.db
 
-.ipynb_checkpoints/
-*.mp4
-*.avi
-*.mkv
-*.mov
-*.pt
-*.pth
-*.onnx
-*.engine
-*.so
-*.o
-*.a
-runs/
-data/
-*.tar.gz
+# DeepStream / TensorRT
+*.engine           # TensorRT engine files (generated from ONNX models)
+output.mp4         # Output video file
+output*.mp4        # Any output files
+tensorrt_cache/    # TensorRT cache directory
