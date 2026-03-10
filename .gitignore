@@ -26,6 +26,8 @@ dist/
 
 # DeepStream / TensorRT
 *.engine           # TensorRT engine files (generated from ONNX models)
-output.mp4         # Output video file
+*.mp4              # Video files
+*.onnx             # Model files (large, regenerateable)
 output*.mp4        # Any output files
 tensorrt_cache/    # TensorRT cache directory
+data/              # Input data files
