@@ -2,7 +2,7 @@ BaseConfig:
   minDetectorConfidence: 0.25
 
 TargetManagement:
-  maxShadowTrackingAge: 60
+  maxShadowTrackingAge: 180
   probationAge: 3
   earlyTerminationAge: 1
 

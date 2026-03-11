@@ -144,8 +144,72 @@ rtspsrc → rtph264depay → h264parse → capsfilter → nvv4l2decoder
   - [OSD] Frame #1606+ showing
 - **Next:** Switched from fakesink to filesink for actual output
 
-### 11. Current Status
-- Filesink enabled - testing MP4 output
+### 11. Pipeline Fixed! (2026-03-11)
+- Relaxed capsfilter fixed the data flow issue
+- Pipeline now works: RTP → depay → parser → decoder → streammux → inference → tracker → OSD
+- Data flows through all stages: [DEPAY] → [STREAMMUX] → [OSD] Frame #1-4
+- Pipeline state reaches "playing"
+- **NEW ISSUE FOUND:** Using filesink directly writes raw H264, not MP4 container!
+
+### 12. Adding Encoder + Muxer for MP4
+- **Problem:** filesink writes raw bitstream, not MP4 container
+- **Solution:** Need encoder + muxer between OSD and filesink
+- Tried: `nvv4l2h264enc` - property `insert-sps-pps` doesn't exist
+- Tried: `nvv4l2h264enc` with different props - property `external-rc` doesn't exist
+- Tried: `x264enc` - element returns None (not available in container)
+- **Current Status:** Finding compatible encoder
+
+### 13. Adding Encoder + Muxer (FIXED - 2026-03-11)
+- Encoder `nvv4l2h264enc` created successfully!
+- **Issue:** Link encoder → muxer failed (missing h264parse)
+- **Fix:** Added h264parse between encoder and muxer
+- **RESULT:** Pipeline is now FULLY WORKING! ✅
+- Output MP4 file is generated correctly
+
+### 14. Label Positioning (Added - 2026-03-11)
+- **Feature:** Different label positions based on class
+- `person` class: label at **bottom** of bbox
+- `head` class: label at **top** of bbox
+- Uses `y_offset` property in text_params
+
+### Final Working Pipeline
+```
+rtspsrc → rtph264depay → h264parse → capsfilter → nvv4l2decoder
+→ nvstreammux → nvinfer → nvtracker → nvvideoconvert → nvdsosd
+→ queue → nvvideoconvert → nvv4l2h264enc → h264parse → qtmux → filesink
+```
+
+### Features Implemented
+1. ✅ RTSP stream input (from MediaMTX)
+2. ✅ H264 decoding (nvv4l2decoder)
+3. ✅ Object detection with YOLO (nvinfer)
+4. ✅ Object tracking (nvtracker)
+5. ✅ OSD with bounding boxes and labels
+6. ✅ Dynamic label positioning (person=bottom, head=top)
+7. ✅ MP4 output with encoder + muxer
+8. ✅ Only display "head" class (ignore "person")
+9. ✅ Show tracking ID only for head class
+
+### Pipeline Order (Important!)
+```
+1. RTSP Input
+2. Decode (nvv4l2decoder)
+3. Streammux
+4. Detection (nvinfer)      ← Detection happens here
+5. Tracking (nvtracker)     ← Tracking happens here
+6. OSD (nvdsosd)            ← Draws bounding boxes
+7. ENCODE (nvv4l2h264enc)   ← Video encoding (AFTER tracking!)
+8. Mux (qtmux)              ← MP4 container
+9. Filesink                 ← Write to file
+```
+**Note:** Encoder is AFTER tracking, so it does NOT affect tracking efficiency.
+
+### Tracker Properties (2026-03-11)
+- Using original config: `config_tracker_NvDCF_perf.yml`
+- Tried setting properties directly in code:
+  - `max-shadow-tracking-age: 180` (longer tracking)
+  - `min-detector-confidence: 0.25`
+- Note: Some properties may require config file, not set_property()
 
 ---
 

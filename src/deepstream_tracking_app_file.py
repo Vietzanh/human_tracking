@@ -12,42 +12,6 @@ Gst.init(None)
 # ─── Classes theo labelfile ───────────────────────────────────────────────────
 pgie_classes_str = ["person", "head"]
 
-# ─── Probe: depay sink - check if RTP data reaches depay ─────────────────────
-_rtp_count = 0
-def depay_sink_probe(pad, info, u_data):
-    global _rtp_count
-    _rtp_count += 1
-    if _rtp_count % 30 == 0:
-        print(f"[DEPAY] RTP packet #{_rtp_count}")
-    return Gst.PadProbeReturn.OK
-
-# ─── Probe: depay src - check if H264 data leaves depay ─────────────────────
-_depay_count = 0
-def depay_src_probe(pad, info, u_data):
-    global _depay_count
-    _depay_count += 1
-    if _depay_count % 30 == 0:
-        print(f"[DEPAY] H264 packet #{_depay_count}")
-    return Gst.PadProbeReturn.OK
-
-# ─── Probe: decoder sink - check if H264 reaches decoder ─────────────────────
-_decoder_sink_count = 0
-def decoder_sink_probe(pad, info, u_data):
-    global _decoder_sink_count
-    _decoder_sink_count += 1
-    if _decoder_sink_count % 30 == 0:
-        print(f"[DECODER_SINK] H264 nal #{_decoder_sink_count}")
-    return Gst.PadProbeReturn.OK
-
-# ─── Probe: decoder src - check if frames reach decoder ──────────────────────
-_frame_count = 0
-def decoder_src_probe(pad, info, u_data):
-    global _frame_count
-    _frame_count += 1
-    if _frame_count % 30 == 0:  # Print every 30 frames
-        print(f"[DECODER] Frame #{_frame_count}")
-    return Gst.PadProbeReturn.OK
-
 # ─── Probe: streammux src - check if frames leave streammux ──────────────────
 def streammux_src_probe(pad, info, u_data):
     print("[STREAMMUX] Frame pushed to inference!")
@@ -96,8 +60,6 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
             # For head, position at top of bbox
             if class_name == "head":
                 obj_meta.text_params.y_offset = int(rect_top - 25) if rect_top > 25 else int(rect_top)
-                # Position at top of bbox
-                obj_meta.text_params.y_offset = int(rect_top - 25) if rect_top > 25 else int(rect_top)
 
             # Style chữ
             obj_meta.text_params.font_params.font_name = "Serif"
@@ -122,42 +84,30 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
 
     return Gst.PadProbeReturn.OK
 
-# ─── Callback: link rtspsrc → depay động ─────────────────────────────────────
-def cb_newpad(src, new_pad, depay):
+# ─── Callback: link qtdemux → h264parse ───────────────────────────────────
+def cb_newpad(src, new_pad, data):
+    print(f"[*] Demux pad added: {new_pad.get_name()}")
+
+    # Get the parser from data
+    parser = data
+
+    # Check if it's video
     caps = new_pad.get_current_caps()
     if not caps:
         caps = new_pad.query_caps(None)
 
     structure = caps.get_structure(0)
     name = structure.get_name()
-    print(f"[*] Phát hiện Pad: {name}")
 
-    if name == "application/x-rtp":
-        encoding = structure.get_string("encoding-name")
-        print(f"[*] RTP encoding: {encoding}")
-
-        if encoding == "H264":
-            sink_pad = depay.get_static_pad("sink")
-            if not sink_pad.is_linked():
-                ret = new_pad.link(sink_pad)
-                if ret == Gst.PadLinkReturn.OK:
-                    print("[+] rtspsrc -> depay linked thành công (H264)!")
-
-                    # Add probe on depay src AFTER linking
-                    GLib.timeout_add(500, add_depay_src_probe, depay)
-                else:
-                    print(f"[-] LỖI: rtspsrc không thể link vào depay. Mã lỗi: {ret}")
-
-# Add depay src probe after delay to ensure pad exists
-def add_depay_src_probe(depay):
-    print("[*] Adding depay src probe...")
-    try:
-        depay_src_pad = depay.get_static_pad("src")
-        depay_src_pad.add_probe(Gst.PadProbeType.BUFFER, depay_src_probe, 0)
-        print("[+] Depay src probe added!")
-    except Exception as e:
-        print(f"[-] Error adding depay src probe: {e}")
-    return False  # Don't repeat
+    if name == "video/x-h264":
+        print(f"[*] H264 stream detected!")
+        sink_pad = parser.get_static_pad("sink")
+        if not sink_pad.is_linked():
+            ret = new_pad.link(sink_pad)
+            if ret == Gst.PadLinkReturn.OK:
+                print("[+] qtdemux -> h264parse linked!")
+            else:
+                print(f"[-] Failed to link: {ret}")
 
 # ─── Helper: link tuần tự có kiểm tra ───────────────────────────────────────
 def link_elements_with_check(elements):
@@ -195,28 +145,41 @@ def bus_call(bus, message, loop):
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def main():
     global _pipeline
+
+    # Input and output file paths
+    input_file = "/work/data/output_h264.mp4"
+    output_file = "/work/src/output_file.mp4"
+
     pipeline = Gst.Pipeline()
     _pipeline = pipeline
 
     # ── 1. KHỞI TẠO ELEMENTS ─────────────────────────────────────────────────
-    source   = Gst.ElementFactory.make("rtspsrc",        "rtsp-source")
-    depay    = Gst.ElementFactory.make("rtph264depay",   "depay")
-    parser   = Gst.ElementFactory.make("h264parse",      "parser")
-    parser.set_property("config-interval", 1)  # Insert SPS/PPS every second
+    # Use filesrc + qtdemux + h264parse for MP4 file input
+    filesrc = Gst.ElementFactory.make("filesrc", "file-source")
+    filesrc.set_property("location", input_file)
+
+    # MP4 demuxer
+    qtdemux = Gst.ElementFactory.make("qtdemux", "demux")
+
+    # H264 parser
+    h264parse_input = Gst.ElementFactory.make("h264parse", "h264parse-input")
 
     # Add capsfilter to ensure proper format between parser and decoder
-    # Use relaxed caps - let decoder handle different profiles
     capsfilter = Gst.ElementFactory.make("capsfilter", "capsfilter")
     caps = Gst.Caps.from_string("video/x-h264")  # Relaxed - no profile restriction
     capsfilter.set_property("caps", caps)
+
     # Use NVIDIA decoder
-    decoder  = Gst.ElementFactory.make("nvv4l2decoder",  "decoder")
-    queue    = Gst.ElementFactory.make("queue",          "queue")
-    streammux= Gst.ElementFactory.make("nvstreammux",    "streammux")
-    pgie     = Gst.ElementFactory.make("nvinfer",        "primary-inference")
-    tracker  = Gst.ElementFactory.make("nvtracker",      "tracker")
-    nvvidconv= Gst.ElementFactory.make("nvvideoconvert", "nvvidconv")
-    nvosd    = Gst.ElementFactory.make("nvdsosd",        "onscreendisplay")
+    decoder = Gst.ElementFactory.make("nvv4l2decoder", "decoder")
+
+    # Use NVIDIA decoder
+    decoder = Gst.ElementFactory.make("nvv4l2decoder", "decoder")
+
+    streammux = Gst.ElementFactory.make("nvstreammux", "streammux")
+    pgie = Gst.ElementFactory.make("nvinfer", "primary-inference")
+    tracker = Gst.ElementFactory.make("nvtracker", "tracker")
+    nvvidconv = Gst.ElementFactory.make("nvvideoconvert", "nvvidconv")
+    nvosd = Gst.ElementFactory.make("nvdsosd", "onscreendisplay")
 
     # Queue for better buffering
     queue_osd = Gst.ElementFactory.make("queue", "queue-osd")
@@ -225,7 +188,6 @@ def main():
     nvvidconv_post_osd = Gst.ElementFactory.make("nvvideoconvert", "nvvidconv_post_osd")
 
     # Add encoder + muxer for MP4 output
-    # Try multiple encoder options
     encoder = Gst.ElementFactory.make("nvv4l2h264enc", "encoder")
     encoder_name = "nvv4l2h264enc"
     if encoder is None:
@@ -250,12 +212,12 @@ def main():
 
     # Use filesink for output
     filesink = Gst.ElementFactory.make("filesink", "filesink")
-    filesink.set_property("location", "/work/src/output.mp4")
+    filesink.set_property("location", output_file)
     filesink.set_property("sync", False)
 
     # Kiểm tra element tạo thành công
     required = [
-        source, depay, parser, capsfilter, decoder, streammux,
+        filesrc, qtdemux, h264parse_input, capsfilter, decoder, streammux,
         pgie, tracker, nvvidconv, nvosd, queue_osd,
         nvvidconv_post_osd, encoder, h264parse, muxer, filesink
     ]
@@ -274,35 +236,28 @@ def main():
         encoder.set_property("bitrate", 4000)  # 4 Mbps
         encoder.set_property("speed-preset", "ultrafast")
 
-    # [source0]
-    source.set_property("location",        "rtsp://127.0.0.1:8554/input_stream")
-    source.set_property("latency",         200)
-    source.set_property("drop-on-latency", True)
-    source.set_property("protocols",       4)       # TCP
-
-    # [streammux]
-    streammux.set_property("width",                1920)
-    streammux.set_property("height",               1080)
-    streammux.set_property("batch-size",           1)
-    streammux.set_property("live-source",          1)
-    streammux.set_property("batched-push-timeout", 40000)  # 40ms - push frames faster
+    # [streammux] - NOT live source for file input
+    streammux.set_property("width", 1920)
+    streammux.set_property("height", 1080)
+    streammux.set_property("batch-size", 1)
+    streammux.set_property("live-source", 0)  # NOT live for file input
+    streammux.set_property("batched-push-timeout", 40000)
 
     # [primary-gie]
     pgie.set_property("config-file-path", "/work/deepstream/pgie_config.txt")
 
-    # [tracker] – use original config + set properties directly
+    # [tracker] – use original config
     tracker.set_property("ll-lib-file",
         "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so")
     tracker.set_property("ll-config-file",
         "/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml")
-    tracker.set_property("tracker-width",  1920)
+    tracker.set_property("tracker-width", 1920)
     tracker.set_property("tracker-height", 1088)
 
-    # Try setting tracker properties directly (may override config)
-    # Note: Some properties may require config file, but let's try
+    # Try setting tracker properties directly
     try:
-        tracker.set_property("max-shadow-tracking-age", 180)  # Higher = longer tracking
-        tracker.set_property("min-detector-confidence", 0.25)  # Lower = more detections
+        tracker.set_property("max-shadow-tracking-age", 180)
+        tracker.set_property("min-detector-confidence", 0.25)
     except Exception as e:
         print(f"[!] Could not set tracker properties directly: {e}")
 
@@ -311,19 +266,33 @@ def main():
         pipeline.add(el)
 
     # ── 4. KẾT NỐI ──────────────────────────────────────────────────────────
-    source.connect("pad-added", cb_newpad, depay)
+    # Connect uridecodebin pad-added signal to link to decoder
+    qtdemux.connect("pad-added", cb_newpad, h264parse_input)
 
     print("\n--- BẮT ĐẦU LINK ELEMENTS ---")
 
-    # Decode chain → queue
-    # Try linking decoder directly to streammux without queue
-    link_elements_with_check([depay, parser, capsfilter, decoder])
-    # Link decoder to streammux directly
-    # Link decoder directly to streammux (no queue)
+    # Link input chain: filesrc -> qtdemux -> h264parse -> decoder
+    if not filesrc.link(qtdemux):
+        print("[-] ERROR: Failed to link filesrc -> qtdemux")
+    else:
+        print("[*] Linked filesrc -> qtdemux")
+
+    # Link h264parse -> capsfilter -> decoder
+    if not h264parse_input.link(capsfilter):
+        print("[-] ERROR: Failed to link h264parse -> capsfilter")
+    else:
+        print("[*] Linked h264parse -> capsfilter")
+
+    if not capsfilter.link(decoder):
+        print("[-] ERROR: Failed to link capsfilter -> decoder")
+    else:
+        print("[*] Linked capsfilter -> decoder")
+
+    # Link decoder to streammux
     decoder_src = decoder.get_static_pad("src")
     streammux_sink = streammux.get_request_pad("sink_0")
     if decoder_src.link(streammux_sink) == Gst.PadLinkReturn.OK:
-        print("[*] Linked decoder -> streammux directly (no queue)")
+        print("[*] Linked decoder -> streammux")
     else:
         print("[-] ERROR: Failed to link decoder -> streammux")
 
@@ -336,23 +305,6 @@ def main():
     print("------------------------------\n")
 
     # ── 5. PROBES ────────────────────────────────────────────────────────────
-    # Add probes to debug frame flow
-    # Depay sink probe (this pad exists)
-    depay_sink_pad = depay.get_static_pad("sink")
-    depay_sink_pad.add_probe(Gst.PadProbeType.BUFFER, depay_sink_probe, 0)
-
-    # Note: depay src probe is added in cb_newpad callback after pad linking
-    # Parser src probe (to check if depay outputs data)
-    parser_src_pad = parser.get_static_pad("src")
-    parser_src_pad.add_probe(Gst.PadProbeType.BUFFER, depay_src_probe, 0)  # Reuse for simplicity
-
-    # Decoder sink probe (to check if H264 reaches decoder)
-    decoder_sink_pad = decoder.get_static_pad("sink")
-    decoder_sink_pad.add_probe(Gst.PadProbeType.BUFFER, decoder_sink_probe, 0)
-
-    decoder_src_pad = decoder.get_static_pad("src")
-    decoder_src_pad.add_probe(Gst.PadProbeType.BUFFER, decoder_src_probe, 0)
-
     streammux_src_pad = streammux.get_static_pad("src")
     streammux_src_pad.add_probe(Gst.PadProbeType.BUFFER, streammux_src_probe, 0)
 
@@ -369,7 +321,8 @@ def main():
 
     pipeline.set_state(Gst.State.PLAYING)
     print("Đang chạy...")
-    print("  Output: /work/src/output.mp4")
+    print(f"  Input: {input_file}")
+    print(f"  Output: {output_file}")
     print("Nhấn Ctrl+C để dừng và lưu file.\n")
 
     try:
@@ -390,7 +343,7 @@ def main():
             print("[*] Timeout, file saved.")
 
     pipeline.set_state(Gst.State.NULL)
-    print("[+] Đã lưu file output.mp4 an toàn!")
+    print(f"[+] Đã lưu file {output_file} an toàn!")
 
 if __name__ == "__main__":
     main()
