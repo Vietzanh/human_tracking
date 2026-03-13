@@ -1,0 +1,73 @@
+#ifndef GST_CUSTOM_TRACKER_H
+#define GST_CUSTOM_TRACKER_H
+
+#include <gst/base/gstbasetransform.h>
+#include <gst/gst.h>
+#include <gst/video/video.h>
+
+#include "customtracker.h"
+
+/* GStreamer plugin version */
+#define GST_CUSTOM_TRACKER_VERSION "1.0"
+#define GST_CUSTOM_TRACKER_NAME "gstcustomtracker"
+
+/* Forward declarations */
+G_BEGIN_DECLS
+typedef struct _GstCustomTracker GstCustomTracker;
+typedef struct _GstCustomTrackerClass GstCustomTrackerClass;
+
+/* Check GStreamer version */
+#ifndef GST_CAT_DEFAULT
+#define GST_CAT_DEFAULT custom_tracker_debug
+#endif
+
+/* GstCustomTracker structure */
+struct _GstCustomTracker {
+    GstBaseTransform parent;
+
+    /* Tracker instance */
+    CustomTracker* tracker;
+
+    /* Configuration */
+    TrackerConfig config;
+
+    /* Video info */
+    guint width;
+    guint height;
+    guint fps_n;
+    guint fps_d;
+
+    /* Statistics */
+    guint64 frame_count;
+    guint64 track_count;
+
+    /* Properties */
+    gfloat high_confidence_threshold;
+    gfloat low_confidence_threshold;
+    gint max_time_lost;
+    gfloat iou_threshold;
+};
+
+/* GstCustomTrackerClass structure */
+struct _GstCustomTrackerClass {
+    GstBaseTransformClass parent_class;
+};
+
+/* Get type function */
+GType gst_custom_tracker_get_type(void);
+
+/* Define the GType */
+#define GST_TYPE_CUSTOM_TRACKER (gst_custom_tracker_get_type())
+
+/* Cast macros */
+#define GST_CUSTOM_TRACKER(obj) (G_TYPE_CHECK_INSTANCE_CAST((obj), GST_TYPE_CUSTOM_TRACKER, GstCustomTracker))
+#define GST_CUSTOM_TRACKER_CLASS(klass) (G_TYPE_CHECK_CLASS_CAST((klass), GST_TYPE_CUSTOM_TRACKER, GstCustomTrackerClass))
+#define GST_IS_CUSTOM_TRACKER(obj) (G_TYPE_CHECK_INSTANCE_TYPE((obj), GST_TYPE_CUSTOM_TRACKER))
+#define GST_IS_CUSTOM_TRACKER_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE((klass), GST_TYPE_CUSTOM_TRACKER))
+
+/* Plugin initialization function */
+static gboolean plugin_init(GstPlugin* plugin);
+
+G_END_DECLS
+
+#endif /* GST_CUSTOM_TRACKER_H */

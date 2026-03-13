@@ -92,6 +92,13 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
             # Position: head -> top of bbox
             rect_top = obj_meta.rect_params.top
             rect_height = obj_meta.rect_params.height
+            rect_left = obj_meta.rect_params.left
+            rect_width = obj_meta.rect_params.width
+
+            # DEBUG: Print bbox values to check normalized vs pixel
+            print(f"[DEBUG] Pixel bbox: left={rect_left}, top={rect_top}, "
+                  f"width={rect_width}, height={rect_height}")
+            print(f"[DEBUG] Frame size: {frame_meta.source_width}x{frame_meta.source_height}")
 
             # For head, position at top of bbox
             if class_name == "head":
