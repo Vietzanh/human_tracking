@@ -22,10 +22,10 @@ CXX = g++
 # DeepStream version
 DS_VERSION = 6.4
 
-# DeepStream paths (in Docker container)
-DS_ROOT = /opt/nvidia/deepstream/deepstream
-DS_INC = $(DS_ROOT)/include
-DS_LIB = $(DS_ROOT)/lib
+# DeepStream paths (in Docker container) - DS 7.0
+DS_ROOT = /opt/nvidia/deepstream/deepstream-7.0
+DS_INC = $(DS_ROOT)/sources/includes
+DS_LIB = /opt/nvidia/deepstream/deepstream/lib
 
 # GStreamer paths
 GST_INC = /usr/include/gstreamer-1.0
@@ -35,6 +35,7 @@ GSTREAMER_1.0_GSTCONFIG = /usr/lib/x86_64-linux-gnu/gstreamer-1.0/include/gst
 # Include paths
 INCLUDES = -I$(GST_INC) \
            -I$(GST_GLIB_INC) \
+           -I/usr/include/glib-2.0 \
            -I$(DS_INC) \
            -I.
 
@@ -45,7 +46,6 @@ LDFLAGS = -L$(DS_LIB) \
 # Libraries to link
 LIBS = -lnvdsgst_meta \
        -lnvds_meta \
-       -lnvdsbatchmeta \
        -lgstbase-1.0 \
        -lgstreamer-1.0 \
        -lgobject-2.0 \
@@ -59,7 +59,7 @@ CXXFLAGS = $(CFLAGS) $(INCLUDES)
 LINK_FLAGS = -shared -Wl,-soname,$(TARGET) $(LDFLAGS) $(LIBS)
 
 # Installation path (GStreamer plugins directory)
-INSTALL_PATH = /usr/lib/x86_64-linux-gnu/gstreamer-1.0/plugins/
+INSTALL_PATH = /usr/lib/x86_64-linux-gnu/gstreamer-1.0/
 
 # Default target
 all: $(TARGET)

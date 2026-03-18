@@ -31,3 +31,31 @@ dist/
 output*.mp4
 tensorrt_cache/
 data/
+
+# C/C++ build artifacts
+*.o
+*.a
+*.so
+*.out
+
+# DeepStream custom libs
+deepstream/*.so
+src/custom_tracker/*.so
+src/custom_tracker/*.o
+
+# CMake / Make build folders (nếu có)
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# TensorRT / DeepStream cache bổ sung
+*.cache
+*.plan
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Temporary files
+*.swp
+*.tmp

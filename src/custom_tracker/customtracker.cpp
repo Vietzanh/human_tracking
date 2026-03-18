@@ -19,10 +19,10 @@
 // ============================================================================
 
 BYTETrack::BYTETrack(int id, const TrackingObject& det)
-    : track_id(id), score(det.confidence), state(TrackState::Tracked),
+    : track_id(id), class_id(det.class_id), score(det.confidence), state(TrackState::Tracked),
       frames_since_update(0), hits(1), age(1),
       x(det.bbox_x), y(det.bbox_y), w(det.bbox_w), h(det.bbox_h),
-      vx(0), vy(0) {}
+      vx(0), vy(0), frame_width(1920), frame_height(1080), user_data(det.user_data) {}
 
 void BYTETrack::predict() {
     // Simple linear velocity prediction
@@ -45,9 +45,18 @@ void BYTETrack::update(const TrackingObject& det) {
     vx = det.bbox_x - x;
     vy = det.bbox_y - y;
 
+    // Update class_id in case it changes
+    class_id = det.class_id;
+
     score = det.confidence;
     frames_since_update = 0;
     hits++;
+
+    // Update user_data pointer to point to the latest detection's metadata
+    // This ensures we always update the most recent NvDsObjectMeta
+    if (det.user_data != nullptr) {
+        user_data = det.user_data;
+    }
 }
 
 float BYTETrack::compute_iou(const TrackingObject& det) const {
@@ -62,19 +71,20 @@ float BYTETrack::compute_iou(const TrackingObject& det) const {
 
 TrackingObject BYTETrack::to_tracking_object() const {
     TrackingObject obj;
-    obj.class_id = 0;  // Will be set from detection
+    obj.class_id = class_id;  // Use stored class_id from detection
     obj.confidence = score;
+    obj.user_data = user_data;  // Preserve pointer to NvDsObjectMeta
     obj.bbox_x = x;
     obj.bbox_y = y;
     obj.bbox_w = w;
     obj.bbox_h = h;
     obj.object_id = track_id;
 
-    // Convert to pixel coordinates
-    obj.x1 = x * m_config.frame_width;
-    obj.y1 = y * m_config.frame_height;
-    obj.x2 = (x + w) * m_config.frame_width;
-    obj.y2 = (y + h) * m_config.frame_height;
+    // Convert to pixel coordinates (using member variables)
+    obj.x1 = x * frame_width;
+    obj.y1 = y * frame_height;
+    obj.x2 = (x + w) * frame_width;
+    obj.y2 = (y + h) * frame_height;
 
     return obj;
 }
@@ -105,6 +115,14 @@ void CustomTracker::reset() {
 void CustomTracker::set_frame_size(int width, int height) {
     m_config.frame_width = width;
     m_config.frame_height = height;
+
+    // Also update all existing tracks
+    for (auto& track : m_tracked_stracks) {
+        track->set_frame_size(width, height);
+    }
+    for (auto& track : m_lost_stracks) {
+        track->set_frame_size(width, height);
+    }
 }
 
 // ============================================================================
@@ -311,30 +329,14 @@ std::vector<TrackingObject> CustomTracker::update(const std::vector<TrackingObje
     // =========================================================================
     // STEP 3: Create new tracks for unmatched high confidence detections
     // =========================================================================
-    std::vector<int> matched_low_dets(matches_low.size());
-    for (const auto& [t_idx, d_idx] : matches_low) {
-        matched_low_dets[d_idx] = 1;
-    }
-
     for (int j : unmatched_high_det_indices) {
-        bool matched_in_low = false;
-        for (int k = 0; k < (int)low_conf_dets.size(); k++) {
-            if (matched_low_dets[k]) {
-                // Check if this detection was matched
-                for (const auto& [t_idx, d_idx] : matches_low) {
-                    if (d_idx == k && j == -1) {  // j was not matched
-                        matched_in_low = true;
-                        break;
-                    }
-                }
-            }
-        }
-
         // Create new track for unmatched high confidence detection
         if (j >= 0 && j < (int)high_conf_dets.size()) {
             auto new_track = std::make_shared<BYTETrack>(m_next_id++, high_conf_dets[j]);
             new_track->hits = 1;
             new_track->state = TrackState::Tracked;
+            new_track->frame_width = m_config.frame_width;
+            new_track->frame_height = m_config.frame_height;
             tracked_tracks.push_back(new_track);
             m_tracked_stracks.push_back(new_track);
         }

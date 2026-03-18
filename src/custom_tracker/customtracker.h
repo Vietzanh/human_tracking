@@ -56,9 +56,13 @@ struct TrackingObject {
     // Raw pixel coordinates (for IoU calculation)
     float x1, y1, x2, y2;     // Absolute pixel coordinates
 
+    // Pointer back to original NvDsObjectMeta (for updating metadata)
+    // This is used by the GStreamer plugin to update the correct metadata
+    void* user_data;           // Can store NvDsObjectMeta* or index
+
     TrackingObject() : class_id(0), confidence(0.0f), bbox_x(0), bbox_y(0),
                        bbox_w(0), bbox_h(0), object_id(-1),
-                       x1(0), y1(0), x2(0), y2(0) {}
+                       x1(0), y1(0), x2(0), y2(0), user_data(nullptr) {}
 
     TrackingObject(int cls, float conf, float x, float y, float w, float h) :
         class_id(cls), confidence(conf), bbox_x(x), bbox_y(y),
@@ -96,6 +100,7 @@ enum class TrackState {
 class BYTETrack {
 public:
     int track_id;              // Unique ID for this track
+    int class_id;             // Class ID from detector (person=0, head=1)
     float score;              // Detection score
     TrackState state;         // Current state
     int frames_since_update;  // Frames since last update
@@ -108,6 +113,13 @@ public:
     // For velocity estimation (optional)
     float vx, vy;
 
+    // Frame dimensions (needed for pixel coordinate conversion)
+    int frame_width;
+    int frame_height;
+
+    // Pointer to original NvDsObjectMeta (for updating metadata)
+    void* user_data;
+
     BYTETrack(int id, const TrackingObject& det);
 
     // Predict next position (simple linear prediction)
@@ -118,6 +130,12 @@ public:
 
     // Convert to TrackingObject for output
     TrackingObject to_tracking_object() const;
+
+    // Set frame dimensions
+    void set_frame_size(int width, int height) {
+        frame_width = width;
+        frame_height = height;
+    }
 
 private:
     // Compute IOU with detection
@@ -149,6 +167,12 @@ public:
      */
     void set_frame_size(int width, int height);
 
+    // IoU computation between two detections (made public for BYTETrack access)
+    static float compute_iou(const TrackingObject& a, const TrackingObject& b);
+
+    // IoU between detection and track
+    static float compute_iou(const TrackingObject& det, const BYTETrack& track);
+
 private:
     // Configuration
     TrackerConfig m_config;
@@ -160,12 +184,6 @@ private:
 
     // Track ID counter
     int m_next_id;
-
-    // IoU computation between two detections
-    static float compute_iou(const TrackingObject& a, const TrackingObject& b);
-
-    // IoU between detection and track
-    static float compute_iou(const TrackingObject& det, const BYTETrack& track);
 
     // Linear assignment (Hungarian algorithm or greedy)
     std::vector<std::pair<int, int>> linear_assignment(

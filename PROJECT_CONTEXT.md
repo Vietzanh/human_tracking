@@ -4,6 +4,8 @@
 
 **Note:** Debugging is done locally, but testing/running is performed inside a Docker container on an SSH server. Paths in code reference `/work/` as that's where the project is mounted in the container.
 
+**Rule:** Since you're running on server, commands that require local access (git, ls on local paths, etc.) won't work. Always provide commands that can be copy-pasted directly into the terminal on the server.
+
 ---
 
 ## Project Context
@@ -24,11 +26,63 @@ This is a DeepStream-based human tracking application that:
 │   ├── pgie_config.txt            # Primary GIE (inference) config
 │   └── tracker_config.txt         # Tracker config
 ├── src/
-│   └── deepstream_tracking_app.py # Custom Python DeepStream app (NOT working)
+│   ├── deepstream_tracking_app.py # Custom Python DeepStream app (WORKING)
+│   └── custom_tracker/            # Custom BYTETrack tracker plugin
+│       ├── customtracker.h        # BYTETrack algorithm header
+│       ├── customtracker.cpp      # BYTETrack algorithm implementation
+│       ├── gstcustomtracker.h     # GStreamer plugin header
+│       ├── gstcustomtracker.cpp   # GStreamer plugin implementation
+│       └── Makefile               # Build script
 ├── models/
 │   └── best.onnx                   # YOLO model
 └── .venv/                          # Python virtual environment
 ```
+
+---
+
+## Custom BYTETrack Tracker
+
+### Overview
+A custom GStreamer plugin that implements the **BYTETrack** multi-object tracking algorithm for DeepStream. It replaces the built-in NvDCF tracker with a simpler, more configurable tracking solution.
+
+### Key Features
+- **BYTETrack Algorithm**: Uses both high and low confidence detections for tracking
+- **Two-stage Association**: First matches high-score detections, then recovers lost tracks using low-score detections
+- **Configurable Parameters**:
+  - `high-conf-threshold`: Detection confidence threshold for first association (default: 0.5)
+  - `low-conf-threshold`: Detection confidence threshold for second association (default: 0.1)
+  - `max-time-lost`: Maximum frames to keep lost track alive (default: 30)
+  - `iou-threshold`: IoU threshold for matching detections to tracks (default: 0.3)
+  - `frame-width`: Input frame width (default: 1920)
+  - `frame-height`: Input frame height (default: 1080)
+
+### Build Instructions (in Docker container)
+
+```bash
+cd /work/src/custom_tracker
+make
+sudo make install
+```
+
+### Plugin Registration
+The plugin registers as `customtracker` GStreamer element.
+
+### Pipeline Integration
+To use in pipeline, replace `nvtracker` with `customtracker`:
+```
+... → nvinfer → customtracker → nvvideoconvert → nvdsosd → ...
+```
+
+### Files
+| File | Description |
+|------|-------------|
+| `customtracker.h` | BYTETrack algorithm header with `CustomTracker` class |
+| `customtracker.cpp` | BYTETrack algorithm implementation |
+| `gstcustomtracker.h` | GStreamer plugin header with `GstCustomTracker` class |
+| `gstcustomtracker.cpp` | GStreamer plugin implementation (element factory, metadata handling) |
+| `Makefile` | Build script for the plugin |
+
+---
 
 ## The Problem
 
@@ -172,18 +226,26 @@ rtspsrc → rtph264depay → h264parse → capsfilter → nvv4l2decoder
 - `head` class: label at **top** of bbox
 - Uses `y_offset` property in text_params
 
-### Final Working Pipeline
+### Final Working Pipeline (Built-in Tracker)
 ```
 rtspsrc → rtph264depay → h264parse → capsfilter → nvv4l2decoder
 → nvstreammux → nvinfer → nvtracker → nvvideoconvert → nvdsosd
 → queue → nvvideoconvert → nvv4l2h264enc → h264parse → qtmux → filesink
 ```
 
+### Alternative: Custom BYTETrack Tracker Pipeline
+```
+rtspsrc → rtph264depay → h264parse → capsfilter → nvv4l2decoder
+→ nvstreammux → nvinfer → customtracker → nvvideoconvert → nvdsosd
+→ queue → nvvideoconvert → nvv4l2h264enc → h264parse → qtmux → filesink
+```
+**Note:** Replace `nvtracker` with `customtracker` to use the custom BYTETrack tracker. Build the plugin first with `make` in `src/custom_tracker/`.
+
 ### Features Implemented
 1. ✅ RTSP stream input (from MediaMTX)
 2. ✅ H264 decoding (nvv4l2decoder)
 3. ✅ Object detection with YOLO (nvinfer)
-4. ✅ Object tracking (nvtracker)
+4. ✅ Object tracking (nvtracker or customtracker)
 5. ✅ OSD with bounding boxes and labels
 6. ✅ Dynamic label positioning (person=bottom, head=top)
 7. ✅ MP4 output with encoder + muxer
@@ -196,7 +258,7 @@ rtspsrc → rtph264depay → h264parse → capsfilter → nvv4l2decoder
 2. Decode (nvv4l2decoder)
 3. Streammux
 4. Detection (nvinfer)      ← Detection happens here
-5. Tracking (nvtracker)     ← Tracking happens here
+5. Tracking (nvtracker or customtracker)     ← Tracking happens here
 6. OSD (nvdsosd)            ← Draws bounding boxes
 7. ENCODE (nvv4l2h264enc)   ← Video encoding (AFTER tracking!)
 8. Mux (qtmux)              ← MP4 container
@@ -254,6 +316,63 @@ output-file=output.mp4
 
 ---
 
+## Current Debug Status (2026-03-18)
+
+### Issue: No Bounding Boxes in Output Video
+
+Using custom tracker (`customtracker`) - video plays but no bounding boxes appear.
+
+#### Debug Steps Completed
+
+1. **Fixed Custom Tracker Bugs** (customtracker.cpp, customtracker.h, gstcustomtracker.cpp):
+   - Bug 1: `class_id` was hardcoded to 0 - fixed to preserve from detection
+   - Bug 2: Added `user_data` pointer to directly update NvDsObjectMeta
+   - Bug 3: Fixed `update_metadata()` to use direct pointer instead of IoU matching
+
+2. **YOLO Parser Issue** (nvdsparsebbox_custom.cpp):
+   - Old model output: `[1, 6, 8400]` - channel-first format (x all, y all, w all, h all, conf all, class all)
+   - User re-exported ONNX model to: `[1, 300, 6]` - standard detection format [x, y, w, h, conf, class_id]
+   - Fixed parser to use `[1, 300, 6]` format
+   - Parser now correctly outputs: `Total detections: 77`
+
+3. **Current Problem**: C++ parser finds detections but metadata not attached!
+
+#### Latest Log Analysis
+
+```
+[CUSTOM_PARSER] Total detections: 77
+[CUSTOM_PARSER] objectList.size()=77
+[PGIE] Frame #127: batch_meta OK, list=<pyds.GList object>
+[PGIE] Frame #127: frame_meta_list exists
+[PGIE] obj_meta_list: None    <-- PROBLEM HERE!
+[PGIE] Frame #127: NO DETECTIONS
+```
+
+**Summary:**
+- ✅ C++ parser correctly parses 77 detections from YOLO model
+- ✅ Detection objects added to `objectList` (verified in log)
+- ❌ NvDsObjectMeta not being attached to frame metadata
+- ❌ Python probes see frame_meta but obj_meta_list is None
+
+#### Files Being Debugged
+
+| File | Purpose | Status |
+|------|---------|--------|
+| `customtracker.cpp` | BYTETrack algorithm | Fixed |
+| `customtracker.h` | BYTETrack header | Fixed |
+| `gstcustomtracker.cpp` | GStreamer plugin | Fixed |
+| `nvdsparsebbox_custom.cpp` | YOLO parser | Fixed parsing, metadata not attaching |
+| `deepstream_tracking_app.py` | Main app | Has debug probes |
+
+#### What Needs Investigation
+
+Why does the C++ parser return detection objects but they're not attached to NvDsBatchMeta?
+- Check DeepStream 7.0 API changes
+- Check if there's a return value issue
+- Check if custom-lib-path is being loaded correctly
+
+---
+
 ## Commands to Run
 
 ```bash
@@ -277,15 +396,3 @@ python3 src/deepstream_tracking_app.py
 4. Should we try using DeepStream's `nvstreamdemux` or other DeepStream-specific elements?
 
 ---
-
-## Notes for Future Debugging
-
-The issue is specifically with **nvv4l2decoder not outputting decoded frames** despite receiving H264 input. This happens:
-- Whether or not there's a queue between decoder and streammux
-- Whether or not there's a file output (fakesink test confirmed this)
-
-Possible next steps:
-1. Try using software decoder (`avdec_h264`) - NOT available in container
-2. Try adding more decoder properties (disable-dpb, etc.)
-3. Investigate if DeepStream's internal handling differs from manual pipeline
-4. Consider using DeepStream's native source elements instead of rtspsrc

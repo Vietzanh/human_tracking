@@ -53,6 +53,112 @@ def streammux_src_probe(pad, info, u_data):
     print("[STREAMMUX] Frame pushed to inference!")
     return Gst.PadProbeReturn.OK
 
+# ─── Probe: After inference (pgie src) - check detections ───────────────────
+_pgie_detected_count = 0
+def pgie_src_probe(pad, info, u_data):
+    global _pgie_detected_count
+    _pgie_detected_count += 1
+
+    gst_buffer = info.get_buffer()
+    if not gst_buffer:
+        print(f"[PGIE] Frame #{_pgie_detected_count}: No GST buffer")
+        return Gst.PadProbeReturn.OK
+
+    batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
+
+    if not batch_meta:
+        print(f"[PGIE] Frame #{_pgie_detected_count}: No batch meta")
+        return Gst.PadProbeReturn.OK
+
+    print(f"[PGIE] Frame #{_pgie_detected_count}: batch_meta OK, list={batch_meta.frame_meta_list}")
+
+    # Count detections
+    num_objects = 0
+    l_frame = batch_meta.frame_meta_list
+
+    # Handle None vs empty list
+    if l_frame is None:
+        print(f"[PGIE] Frame #{_pgie_detected_count}: frame_meta_list is None!")
+        # Try alternate API
+        try:
+            print(f"[PGIE] Checking batch_num_frames: {batch_meta.batch_num_frames}")
+            print(f"[PGIE] Checking source_list: {batch_meta.source_list}")
+        except:
+            pass
+    else:
+        print(f"[PGIE] Frame #{_pgie_detected_count}: frame_meta_list exists")
+
+    while l_frame and l_frame.data:
+        frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
+        print(f"[PGIE] Frame #{_pgie_detected_count}: Got frame_meta")
+        l_obj = frame_meta.obj_meta_list
+        print(f"[PGIE] obj_meta_list: {l_obj}")
+        while l_obj and l_obj.data:
+            num_objects += 1
+            obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
+            print(f"[PGIE] Detection #{num_objects}: class_id={obj_meta.class_id}, "
+                  f"conf={obj_meta.confidence:.3f}")
+            try:
+                l_obj = l_obj.next
+            except:
+                break
+        try:
+            l_frame = l_frame.next
+        except:
+            break
+
+    if num_objects == 0:
+        print(f"[PGIE] Frame #{_pgie_detected_count}: NO DETECTIONS")
+    else:
+        print(f"[PGIE] Frame #{_pgie_detected_count}: Found {num_objects} detection(s)")
+
+    return Gst.PadProbeReturn.OK
+
+# ─── Probe: After tracker - check tracking IDs ──────────────────────────────
+_tracker_check_count = 0
+def tracker_src_probe(pad, info, u_data):
+    global _tracker_check_count
+    _tracker_check_count += 1
+
+    gst_buffer = info.get_buffer()
+    if not gst_buffer:
+        return Gst.PadProbeReturn.OK
+
+    batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
+    if not batch_meta:
+        return Gst.PadProbeReturn.OK
+
+    # Count tracked objects
+    num_objects = 0
+    l_frame = batch_meta.frame_meta_list
+    while l_frame:
+        frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
+        l_obj = frame_meta.obj_meta_list
+        while l_obj:
+            num_objects += 1
+            obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
+            class_name = pgie_classes_str[obj_meta.class_id] \
+                if obj_meta.class_id < len(pgie_classes_str) else "unknown"
+            print(f"[TRACKER] Object #{num_objects}: track_id={obj_meta.object_id}, "
+                  f"class={class_name}, "
+                  f"bbox=({obj_meta.rect_params.left}, {obj_meta.rect_params.top}, "
+                  f"{obj_meta.rect_params.width}x{obj_meta.rect_params.height})")
+            try:
+                l_obj = l_obj.next
+            except StopIteration:
+                break
+        try:
+            l_frame = l_frame.next
+        except StopIteration:
+            break
+
+    if num_objects == 0:
+        print(f"[TRACKER] Frame #{_tracker_check_count}: NO OBJECTS")
+    else:
+        print(f"[TRACKER] Frame #{_tracker_check_count}: Found {num_objects} object(s)")
+
+    return Gst.PadProbeReturn.OK
+
 # ─── Probe: OSD – vẽ bbox + tên class + "anhtv" ──────────────────────────────
 _frame_count_osd = 0
 def osd_sink_pad_buffer_probe(pad, info, u_data):
@@ -221,7 +327,7 @@ def main():
     queue    = Gst.ElementFactory.make("queue",          "queue")
     streammux= Gst.ElementFactory.make("nvstreammux",    "streammux")
     pgie     = Gst.ElementFactory.make("nvinfer",        "primary-inference")
-    tracker  = Gst.ElementFactory.make("nvtracker",      "tracker")
+    tracker  = Gst.ElementFactory.make("customtracker", "tracker")
     nvvidconv= Gst.ElementFactory.make("nvvideoconvert", "nvvidconv")
     nvosd    = Gst.ElementFactory.make("nvdsosd",        "onscreendisplay")
 
@@ -297,21 +403,13 @@ def main():
     # [primary-gie]
     pgie.set_property("config-file-path", "/work/deepstream/pgie_config.txt")
 
-    # [tracker] – use original config + set properties directly
-    tracker.set_property("ll-lib-file",
-        "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so")
-    tracker.set_property("ll-config-file",
-        "/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml")
-    tracker.set_property("tracker-width",  1920)
-    tracker.set_property("tracker-height", 1088)
-
-    # Try setting tracker properties directly (may override config)
-    # Note: Some properties may require config file, but let's try
-    try:
-        tracker.set_property("max-shadow-tracking-age", 180)  # Higher = longer tracking
-        tracker.set_property("min-detector-confidence", 0.25)  # Lower = more detections
-    except Exception as e:
-        print(f"[!] Could not set tracker properties directly: {e}")
+    # [tracker] – custom BYTETrack tracker properties
+    tracker.set_property("high-conf-threshold", 0.5)   # First association threshold
+    tracker.set_property("low-conf-threshold", 0.1)    # Second association threshold
+    tracker.set_property("max-time-lost", 30)          # Frames to keep lost track
+    tracker.set_property("iou-threshold", 0.3)         # IoU matching threshold
+    tracker.set_property("frame-width", 1920)          # Input frame width
+    tracker.set_property("frame-height", 1080)         # Input frame height
 
     # ── 3. ADD VÀO PIPELINE ─────────────────────────────────────────────────
     for el in required:
@@ -362,6 +460,14 @@ def main():
 
     streammux_src_pad = streammux.get_static_pad("src")
     streammux_src_pad.add_probe(Gst.PadProbeType.BUFFER, streammux_src_probe, 0)
+
+    # Add probe after pgie (inference) to see detections
+    pgie_src_pad = pgie.get_static_pad("src")
+    pgie_src_pad.add_probe(Gst.PadProbeType.BUFFER, pgie_src_probe, 0)
+
+    # Add probe after tracker to see tracking IDs
+    tracker_src_pad = tracker.get_static_pad("src")
+    tracker_src_pad.add_probe(Gst.PadProbeType.BUFFER, tracker_src_probe, 0)
 
     osd_sink_pad = nvosd.get_static_pad("sink")
     osd_sink_pad.add_probe(Gst.PadProbeType.BUFFER, osd_sink_pad_buffer_probe, 0)
