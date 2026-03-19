@@ -295,81 +295,195 @@ live-source=1
 config-file=pgie_config.txt
 
 [tracker]
-ll-lib-file=/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
-ll-config-file=/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml
+enable=1
 tracker-width=1920
 tracker-height=1088
+ll-lib-file=/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+ll-config-file=/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml
+gpu-id=0
 
 [osd]
 enable=1
+gpu-id=0
 border-width=2
 text-size=15
 
+[sink0]
+enable=1
+type=4
+codec=1
+bitrate=4000000
+rtsp-port=8556
+udp-port=5400
+sync=0
+
 [sink1]
 enable=1
-type=3           # File sink
-container=1      # MP4
-codec=1          # H264
+type=3
+container=1
+codec=1
 bitrate=4000000
-output-file=output.mp4
+output-file=output_default.mp4
+sync=0
+```
+
+## pgie's pgie_config.txt (YOLO inference config)
+
+```ini
+[property]
+gpu-id=0
+onnx-file=/work/models/best.onnx
+# model-engine-file is intentionally removed - rebuild from ONNX each time
+labelfile-path=/work/models/labels.txt
+batch-size=1
+network-mode=2
+num-detected-classes=2
+interval=0
+gie-unique-id=1
+process-mode=1
+
+network-type=0
+cluster-mode=1    # Important: use cluster-mode=1 with custom xyxy parser
+net-scale-factor=0.003921568627
+offsets=0;0;0
+model-color-format=0
+infer-dims=3;640;640
+
+maintain-aspect-ratio=1
+symmetric-padding=1
+
+parse-bbox-func-name=NvDsInferParseCustomONNX
+custom-lib-path=/work/deepstream/libnvdsparsebbox_custom.so
+
+[class-attrs-all]
+pre-cluster-threshold=0.25
+nms-iou-threshold=0.45
 ```
 
 ---
 
-## Current Debug Status (2026-03-18)
+## Current Debug Status (2026-03-19)
 
 ### Issue: No Bounding Boxes in Output Video
 
 Using custom tracker (`customtracker`) - video plays but no bounding boxes appear.
 
-#### Debug Steps Completed
+#### Root Cause Analysis - Critical Findings
 
-1. **Fixed Custom Tracker Bugs** (customtracker.cpp, customtracker.h, gstcustomtracker.cpp):
-   - Bug 1: `class_id` was hardcoded to 0 - fixed to preserve from detection
-   - Bug 2: Added `user_data` pointer to directly update NvDsObjectMeta
-   - Bug 3: Fixed `update_metadata()` to use direct pointer instead of IoU matching
+**The ONNX model outputs `[x1, y1, x2, y2, conf, class_id]` in xyxy format, but the custom parser was reading it as `[cx, cy, w, h, conf, class_id]` in xywh format.**
 
-2. **YOLO Parser Issue** (nvdsparsebbox_custom.cpp):
-   - Old model output: `[1, 6, 8400]` - channel-first format (x all, y all, w all, h all, conf all, class all)
-   - User re-exported ONNX model to: `[1, 300, 6]` - standard detection format [x, y, w, h, conf, class_id]
-   - Fixed parser to use `[1, 300, 6]` format
-   - Parser now correctly outputs: `Total detections: 77`
-
-3. **Current Problem**: C++ parser finds detections but metadata not attached!
-
-#### Latest Log Analysis
-
+Evidence from model_info.ipynb ONNX runtime test:
 ```
-[CUSTOM_PARSER] Total detections: 77
-[CUSTOM_PARSER] objectList.size()=77
-[PGIE] Frame #127: batch_meta OK, list=<pyds.GList object>
-[PGIE] Frame #127: frame_meta_list exists
-[PGIE] obj_meta_list: None    <-- PROBLEM HERE!
-[PGIE] Frame #127: NO DETECTIONS
+[[565.24, 232.26, 628.24, 434.29, 0.90722, 0]
+ [ -0.09, 134.11,  44.05, 539.99, 0.79107, 0],  ← NEGATIVE x1! Only valid for xyxy, impossible for xywh]
 ```
 
-**Summary:**
-- ✅ C++ parser correctly parses 77 detections from YOLO model
-- ✅ Detection objects added to `objectList` (verified in log)
-- ❌ NvDsObjectMeta not being attached to frame metadata
-- ❌ Python probes see frame_meta but obj_meta_list is None
+The model was re-exported with `nms=True` (opset=12), which outputs xyxy format instead of the old xywh format.
+
+#### Fix 1: Updated nvdsparsebbox_custom.cpp (xyxy format)
+
+**Before (wrong for current ONNX):**
+```cpp
+obj.left = x;       // treated as center-x
+obj.top = y;        // treated as center-y
+obj.width = w;      // treated as width
+obj.height = h;     // treated as height
+```
+
+**After (correct xyxy format):**
+```cpp
+obj.left = x1;      // x1 = left corner
+obj.top = y1;       // y1 = top corner
+obj.width = x2 - x1; // width from x2 - x1
+obj.height = y2 - y1; // height from y2 - y1
+```
+
+#### Fix 2: TensorRT Engine Mismatch
+
+The pre-built engine `best.onnx_b1_gpu0_fp16.engine` was built from an **older ONNX** with different output format. After deleting the engine and rebuilding, the format now matches.
+
+```bash
+rm -f /work/models/best.onnx_b1_gpu0_fp16.engine
+cd /work/deepstream && ./run.sh  # Rebuilds engine from current ONNX
+```
+
+Verified engine output with trtexec:
+```
+Input binding: images 1x3x640x640
+Output binding: output0 1x300x6  ✅ Matches parser
+```
+
+#### Fix 3: Custom Tracker Makefile - Library Path
+
+The custom tracker `.so` was missing runtime library path for DeepStream libs.
+
+**Changes to Makefile:**
+```makefile
+# Fixed: DS_LIB now points to DS 7.0 correct path
+DS_LIB = /opt/nvidia/deepstream/deepstream-7.0/lib
+
+# Added RPATH so runtime loader can find DeepStream libraries
+LINK_FLAGS = -shared -Wl,-soname,$(TARGET) -Wl,-rpath,$(DS_LIB) $(LDFLAGS) $(LIBS)
+```
+
+#### Build Instructions (Updated)
+
+```bash
+# 1. Rebuild YOLO parser
+cd /work/deepstream && make clean && make
+
+# 2. Rebuild custom tracker with fixed Makefile
+cd /work/src/custom_tracker && make clean && make && sudo make install
+
+# 3. Rebuild TensorRT engine (if ONNX model changed)
+rm -f /work/models/best.onnx_b1_gpu0_fp16.engine
+cd /work/deepstream && ./run.sh
+
+# 4. Run custom app with correct library path
+export LD_LIBRARY_PATH=/opt/nvidia/deepstream/deepstream-7.0/lib:$LD_LIBRARY_PATH
+GST_DEBUG=2 python3 /work/src/deepstream_tracking_app.py
+```
+
+#### Current Status
+
+**Build system:**
+- ✅ YOLO parser rebuilt with xyxy fix
+- ✅ Custom tracker rebuilt with fixed Makefile (DS_LIB + RPATH)
+- ✅ TensorRT engine rebuilt from current ONNX
+
+**Pipeline behavior:**
+- ✅ C++ parser correctly parses detections with proper bbox sizes
+- ✅ Metadata attaches to `obj_meta_list` (detections visible in Python probes)
+- ✅ Built-in NvDCF tracker works AND produces bounding boxes in output video
+- ✅ `./run.sh` with built-in tracker outputs correct video with bounding boxes
+- ✅ Pipeline elements all link correctly (`primary-inference -> tracker` succeeds)
+- ❌ Custom `customtracker` crashes with **Segmentation fault**
+- ❌ **No `[TRACKER_TRANSFORM]` debug messages ever appear** — `transform_ip()` is never called
+- ❌ No `[OSD]` messages appear — pipeline dies before reaching OSD
+
+**Key findings:**
+1. `transform_ip()` is **never called** — GStreamer never reaches the custom tracker's processing function
+2. Crash happens in C++ layer after CUSTOM_PARSER log (before any Python probe)
+3. Even with PGIE probe **disabled**, still no `[TRACKER]` messages → tracker itself is crashing
+4. Built-in `./run.sh` works perfectly with bounding boxes — proves pipeline, parser, and metadata are all correct
+
+**Latest changes (not yet tested):**
+- Added `std::cerr` print at start of `transform_ip()` to bypass GST_DEBUG
+- Set `passthrough_on_same_caps = FALSE` to force `transform_ip()` to be called
+- Next step: rebuild and test
 
 #### Files Being Debugged
 
 | File | Purpose | Status |
 |------|---------|--------|
-| `customtracker.cpp` | BYTETrack algorithm | Fixed |
-| `customtracker.h` | BYTETrack header | Fixed |
-| `gstcustomtracker.cpp` | GStreamer plugin | Fixed |
-| `nvdsparsebbox_custom.cpp` | YOLO parser | Fixed parsing, metadata not attaching |
-| `deepstream_tracking_app.py` | Main app | Has debug probes |
-
-#### What Needs Investigation
-
-Why does the C++ parser return detection objects but they're not attached to NvDsBatchMeta?
-- Check DeepStream 7.0 API changes
-- Check if there's a return value issue
-- Check if custom-lib-path is being loaded correctly
+| `nvdsparsebbox_custom.cpp` | YOLO parser | ✅ Fixed xyxy format |
+| `customtracker.cpp` | BYTETrack algorithm | Working |
+| `customtracker.h` | BYTETrack header | Working |
+| `gstcustomtracker.cpp` | GStreamer plugin | 🔍 Debugging - transform_ip never called |
+| `Makefile` | Custom tracker build | ✅ Fixed DS_LIB path + RPATH |
+| `pgie_config.txt` | YOLO inference config | ✅ cluster-mode=1 |
+| `deepstream_tracking_app.py` | Main app | PGIE probe disabled for testing |
+| `model_info.ipynb` | Model analysis | ✅ Confirmed xyxy ONNX output |
 
 ---
 
@@ -390,9 +504,8 @@ python3 src/deepstream_tracking_app.py
 
 ## Open Questions
 
-1. Why does `nvv4l2decoder` not output frames when linked manually but works with `deepstream-app`?
-2. Does `deepstream-app` use different decoder configuration?
-3. Is there a property missing on the decoder?
-4. Should we try using DeepStream's `nvstreamdemux` or other DeepStream-specific elements?
-
----
+1. ✅ ~~Why does `nvv4l2decoder` not output frames when linked manually but works with `deepstream-app`?~~ — FIXED: Capsfilter profile issue
+2. ✅ ~~ONNX model output format changed (xyxy vs xywh)~~ — FIXED: Parser updated
+3. ✅ ~~Pre-built TensorRT engine format mismatch~~ — FIXED: Engine rebuilt from current ONNX
+4. ✅ ~~Bounding boxes in output~~ — CONFIRMED: `./run.sh` produces bounding boxes correctly
+5. ❌ **Custom tracker segfault** — `transform_ip()` never called. Latest fix: disabled `passthrough_on_same_caps`, added `std::cerr` debug print. Needs rebuild + test.

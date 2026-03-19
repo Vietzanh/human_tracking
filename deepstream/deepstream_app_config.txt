@@ -52,5 +52,5 @@ type=3
 container=1
 codec=1
 bitrate=4000000
-output-file=output.mp4
+output-file=output_default.mp4
 sync=0

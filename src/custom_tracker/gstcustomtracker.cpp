@@ -109,8 +109,11 @@ static void gst_custom_tracker_class_init(GstCustomTrackerClass* klass) {
     basetransform_class->set_caps = GST_DEBUG_FUNCPTR(gst_custom_tracker_set_caps);
     basetransform_class->transform_ip = GST_DEBUG_FUNCPTR(gst_custom_tracker_transform_ip);
 
-    /* Set in-place transformation */
-    basetransform_class->passthrough_on_same_caps = TRUE;
+    /* IMPORTANT: Disable passthrough so transform_ip is always called */
+    basetransform_class->passthrough_on_same_caps = FALSE;
+
+    GST_INFO("Custom BYTETrack tracker class initialized - transform_ip=%p",
+             (void*)gst_custom_tracker_transform_ip);
 
     /* Install properties */
     g_object_class_install_property(
@@ -317,32 +320,51 @@ static std::vector<TrackingObject> extract_detections(GstCustomTracker* tracker,
                                                        NvDsBatchMeta* batch_meta) {
     std::vector<TrackingObject> detections;
 
+    GST_DEBUG_OBJECT(tracker, "[EXTRACT] batch_meta->frame_meta_list = %p",
+                    (void*)batch_meta->frame_meta_list);
+
     NvDsFrameMetaList* frame_meta_list = batch_meta->frame_meta_list;
     if (!frame_meta_list) {
+        GST_DEBUG_OBJECT(tracker, "[EXTRACT] frame_meta_list is NULL!");
         return detections;
     }
 
+    guint frame_count = 0;
     for (NvDsFrameMetaList* l_frame = frame_meta_list; l_frame != NULL;
          l_frame = l_frame->next) {
         NvDsFrameMeta* frame_meta = (NvDsFrameMeta*)l_frame->data;
+        frame_count++;
 
         // Get frame dimensions from tracker (set from caps)
         guint frame_width = tracker->width;
         guint frame_height = tracker->height;
+
+        GST_DEBUG_OBJECT(tracker, "[EXTRACT] Frame %u: obj_meta_list = %p",
+                        frame_count, (void*)frame_meta->obj_meta_list);
 
         NvDsObjectMetaList* obj_meta_list = frame_meta->obj_meta_list;
         if (!obj_meta_list) {
             continue;
         }
 
+        guint obj_count = 0;
         for (NvDsObjectMetaList* l_obj = obj_meta_list; l_obj != NULL;
              l_obj = l_obj->next) {
             NvDsObjectMeta* obj_meta = (NvDsObjectMeta*)l_obj->data;
+            obj_count++;
+
+            GST_DEBUG_OBJECT(tracker, "[EXTRACT] Frame %u, Obj %u: class_id=%d, conf=%.3f, rect=(%.1f,%.1f,%.1f,%.1f)",
+                            frame_count, obj_count,
+                            obj_meta->class_id, obj_meta->confidence,
+                            obj_meta->rect_params.left, obj_meta->rect_params.top,
+                            obj_meta->rect_params.width, obj_meta->rect_params.height);
 
             // Skip objects that are already being tracked (have valid object_id)
             // DeepStream creates fresh metadata each frame with UNTRACKED_OBJECT_ID
             // But if for some reason object_id is set, skip it
             if (obj_meta->object_id != UNTRACKED_OBJECT_ID) {
+                GST_DEBUG_OBJECT(tracker, "[EXTRACT] Frame %u, Obj %u: skipping already tracked (id=%lu)",
+                                frame_count, obj_count, (gulong)obj_meta->object_id);
                 continue;
             }
 
@@ -371,7 +393,13 @@ static std::vector<TrackingObject> extract_detections(GstCustomTracker* tracker,
 
             detections.push_back(det);
         }
+
+        GST_DEBUG_OBJECT(tracker, "[EXTRACT] Frame %u: processed %u objects, total detections so far: %lu",
+                        frame_count, obj_count, (gulong)detections.size());
     }
+
+    GST_DEBUG_OBJECT(tracker, "[EXTRACT] Total: %lu detections from %u frames",
+                    (gulong)detections.size(), frame_count);
 
     return detections;
 }
@@ -383,11 +411,19 @@ static void update_metadata(GstCustomTracker* tracker,
     guint frame_width = tracker->width;
     guint frame_height = tracker->height;
 
+    GST_DEBUG_OBJECT(tracker, "[UPDATE_META] Processing %lu tracks", (gulong)tracks.size());
+
     // Directly update metadata using user_data pointer (pointer to NvDsObjectMeta)
     // This is much more efficient than IoU matching
     for (const auto& track : tracks) {
+        GST_DEBUG_OBJECT(tracker, "[UPDATE_META] Track: object_id=%d, class_id=%d, conf=%.3f, user_data=%p",
+                        track.object_id, track.class_id, track.confidence, track.user_data);
+
         if (track.user_data != nullptr) {
             NvDsObjectMeta* obj_meta = static_cast<NvDsObjectMeta*>(track.user_data);
+
+            GST_DEBUG_OBJECT(tracker, "[UPDATE_META] Assigning track_id=%d to NvDsObjectMeta",
+                            track.object_id);
 
             // Assign the track ID
             obj_meta->object_id = track.object_id;
@@ -398,11 +434,15 @@ static void update_metadata(GstCustomTracker* tracker,
             obj_meta->rect_params.width = track.bbox_w * frame_width;
             obj_meta->rect_params.height = track.bbox_h * frame_height;
 
-            GST_DEBUG_OBJECT(tracker, "Updated object_id=%lu to track_id=%d, bbox=(%.2f,%.2f,%.2f,%.2f)",
+            GST_DEBUG_OBJECT(tracker, "[UPDATE_META] Updated object_id=%lu to track_id=%d, bbox=(%.2f,%.2f,%.2f,%.2f)",
                            (gulong)obj_meta->object_id, track.object_id,
                            track.bbox_x, track.bbox_y, track.bbox_w, track.bbox_h);
+        } else {
+            GST_WARNING_OBJECT(tracker, "[UPDATE_META] Track has NULL user_data! Cannot update metadata.");
         }
     }
+
+    GST_DEBUG_OBJECT(tracker, "[UPDATE_META] Done updating %lu tracks", (gulong)tracks.size());
 }
 
 /* Transform IP - main processing function */
@@ -410,20 +450,34 @@ static GstFlowReturn gst_custom_tracker_transform_ip(GstBaseTransform* trans,
                                                       GstBuffer* buffer) {
     GstCustomTracker* tracker = GST_CUSTOM_TRACKER(trans);
 
+    /* Print immediately to stderr - bypasses GST_DEBUG */
+    std::cerr << "[CUSTOM_TRACKER] transform_ip called! frame=" << tracker->frame_count << std::endl;
+
+    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: START transform_ip",
+                    (gulong)tracker->frame_count);
+
     /* Get metadata from buffer */
     NvDsBatchMeta* batch_meta = NULL;
 
     /* Get DeepStream batch metadata - use the correct API for DeepStream 7.0 */
     batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
 
+    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: batch_meta=%p",
+                    (gulong)tracker->frame_count, (void*)batch_meta);
+
     if (!batch_meta) {
+        GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: NO batch_meta, returning OK",
+                        (gulong)tracker->frame_count);
         return GST_FLOW_OK;
     }
+
+    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: Extracting detections...",
+                    (gulong)tracker->frame_count);
 
     /* Extract detections */
     std::vector<TrackingObject> detections = extract_detections(tracker, batch_meta);
 
-    GST_DEBUG_OBJECT(tracker, "Frame %lu: Extracted %lu detections",
+    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: Extracted %lu detections",
                     (gulong)tracker->frame_count, (gulong)detections.size());
 
     if (detections.empty()) {
@@ -431,13 +485,18 @@ static GstFlowReturn gst_custom_tracker_transform_ip(GstBaseTransform* trans,
         return GST_FLOW_OK;
     }
 
+    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: Running tracker update...",
+                    (gulong)tracker->frame_count);
+
     /* Run tracker */
     std::vector<TrackingObject> tracks = tracker->tracker->update(detections);
 
-    GST_DEBUG_OBJECT(tracker, "Frame %lu: Produced %lu tracks",
+    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: Produced %lu tracks",
                     (gulong)tracker->frame_count, (gulong)tracks.size());
 
     /* Update metadata with tracking results */
+    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: Updating metadata...",
+                    (gulong)tracker->frame_count);
     update_metadata(tracker, batch_meta, tracks);
 
     /* Update statistics */
@@ -446,6 +505,9 @@ static GstFlowReturn gst_custom_tracker_transform_ip(GstBaseTransform* trans,
         GST_INFO_OBJECT(tracker, "Frame %lu: %lu detections, %lu tracks",
                         (gulong)tracker->frame_count, (gulong)detections.size(), (gulong)tracks.size());
     }
+
+    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: DONE, returning OK",
+                    (gulong)tracker->frame_count);
 
     return GST_FLOW_OK;
 }

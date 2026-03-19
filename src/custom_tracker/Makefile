@@ -25,7 +25,7 @@ DS_VERSION = 6.4
 # DeepStream paths (in Docker container) - DS 7.0
 DS_ROOT = /opt/nvidia/deepstream/deepstream-7.0
 DS_INC = $(DS_ROOT)/sources/includes
-DS_LIB = /opt/nvidia/deepstream/deepstream/lib
+DS_LIB = $(DS_ROOT)/lib
 
 # GStreamer paths
 GST_INC = /usr/include/gstreamer-1.0
@@ -55,8 +55,8 @@ LIBS = -lnvdsgst_meta \
 CFLAGS = -fPIC -Wall -std=c++17 -O2 -g
 CXXFLAGS = $(CFLAGS) $(INCLUDES)
 
-# Linker flags
-LINK_FLAGS = -shared -Wl,-soname,$(TARGET) $(LDFLAGS) $(LIBS)
+# Linker flags - add RPATH so runtime loader can find DeepStream libs
+LINK_FLAGS = -shared -Wl,-soname,$(TARGET) -Wl,-rpath,$(DS_LIB) $(LDFLAGS) $(LIBS)
 
 # Installation path (GStreamer plugins directory)
 INSTALL_PATH = /usr/lib/x86_64-linux-gnu/gstreamer-1.0/

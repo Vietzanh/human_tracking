@@ -65,52 +65,30 @@ def pgie_src_probe(pad, info, u_data):
         return Gst.PadProbeReturn.OK
 
     batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
-
     if not batch_meta:
         print(f"[PGIE] Frame #{_pgie_detected_count}: No batch meta")
         return Gst.PadProbeReturn.OK
 
-    print(f"[PGIE] Frame #{_pgie_detected_count}: batch_meta OK, list={batch_meta.frame_meta_list}")
-
-    # Count detections
+    # Count objects per frame - DON'T iterate objects to avoid crash
     num_objects = 0
     l_frame = batch_meta.frame_meta_list
-
-    # Handle None vs empty list
-    if l_frame is None:
-        print(f"[PGIE] Frame #{_pgie_detected_count}: frame_meta_list is None!")
-        # Try alternate API
+    frame_count = 0
+    while l_frame:
+        frame_count += 1
         try:
-            print(f"[PGIE] Checking batch_num_frames: {batch_meta.batch_num_frames}")
-            print(f"[PGIE] Checking source_list: {batch_meta.source_list}")
-        except:
-            pass
-    else:
-        print(f"[PGIE] Frame #{_pgie_detected_count}: frame_meta_list exists")
-
-    while l_frame and l_frame.data:
-        frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
-        print(f"[PGIE] Frame #{_pgie_detected_count}: Got frame_meta")
-        l_obj = frame_meta.obj_meta_list
-        print(f"[PGIE] obj_meta_list: {l_obj}")
-        while l_obj and l_obj.data:
-            num_objects += 1
-            obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
-            print(f"[PGIE] Detection #{num_objects}: class_id={obj_meta.class_id}, "
-                  f"conf={obj_meta.confidence:.3f}")
-            try:
-                l_obj = l_obj.next
-            except:
-                break
-        try:
-            l_frame = l_frame.next
+            frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
+            l_obj = frame_meta.obj_meta_list
+            count_in_frame = 0
+            temp = l_obj
+            while temp:
+                count_in_frame += 1
+                temp = pyds.g_list_next(temp)
+            num_objects += count_in_frame
+            l_frame = pyds.g_list_next(l_frame)
         except:
             break
 
-    if num_objects == 0:
-        print(f"[PGIE] Frame #{_pgie_detected_count}: NO DETECTIONS")
-    else:
-        print(f"[PGIE] Frame #{_pgie_detected_count}: Found {num_objects} detection(s)")
+    print(f"[PGIE] Frame #{_pgie_detected_count}: {num_objects} detections (from {frame_count} frame(s))")
 
     return Gst.PadProbeReturn.OK
 
@@ -119,6 +97,7 @@ _tracker_check_count = 0
 def tracker_src_probe(pad, info, u_data):
     global _tracker_check_count
     _tracker_check_count += 1
+    print(f"[TRACKER] Frame #{_tracker_check_count}: Reached tracker src probe!")
 
     gst_buffer = info.get_buffer()
     if not gst_buffer:
@@ -461,9 +440,9 @@ def main():
     streammux_src_pad = streammux.get_static_pad("src")
     streammux_src_pad.add_probe(Gst.PadProbeType.BUFFER, streammux_src_probe, 0)
 
-    # Add probe after pgie (inference) to see detections
-    pgie_src_pad = pgie.get_static_pad("src")
-    pgie_src_pad.add_probe(Gst.PadProbeType.BUFFER, pgie_src_probe, 0)
+    # ⚠️ TEMPORARILY DISABLED - Comment out PGIE probe to test if it's blocking tracker
+    # pgie_src_pad = pgie.get_static_pad("src")
+    # pgie_src_pad.add_probe(Gst.PadProbeType.BUFFER, pgie_src_probe, 0)
 
     # Add probe after tracker to see tracking IDs
     tracker_src_pad = tracker.get_static_pad("src")

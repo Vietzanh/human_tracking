@@ -3,8 +3,10 @@
 #include <iostream>
 #include <cmath>
 
-// YOLOv8 output: [1, 300, 6] - standard detection format
-// Per detection: [x, y, w, h, conf, class_id]
+// YOLOv8 ONNX output: [1, 300, 6]
+// Per detection: [x1, y1, x2, y2, conf, class_id] (xyxy format, pixels in 640x640 space)
+// After NMS, Ultralytics outputs xyxy NOT xywh!
+// Verify: ONNX runtime test shows -0.09 for x1 (negative = valid corner coord, impossible for xywh)
 
 #define NUM_DETECTIONS 300
 
@@ -26,12 +28,15 @@ bool NvDsInferParseCustomONNX(
     // Debug: Print first 5 detections
     std::cout << "[CUSTOM_PARSER] First 5 detections:" << std::endl;
     for (int i = 0; i < 5; i++) {
-        std::cout << "  det" << i << ": x=" << data[i*6+0]
-                  << ", y=" << data[i*6+1]
-                  << ", w=" << data[i*6+2]
-                  << ", h=" << data[i*6+3]
-                  << ", conf=" << data[i*6+4]
-                  << ", class=" << (int)data[i*6+5] << std::endl;
+        float x1 = data[i*6+0];
+        float y1 = data[i*6+1];
+        float x2 = data[i*6+2];
+        float y2 = data[i*6+3];
+        float conf = data[i*6+4];
+        int class_id = (int)data[i*6+5];
+        std::cout << "  det" << i << ": x1=" << x1 << ", y1=" << y1
+                  << ", x2=" << x2 << ", y2=" << y2
+                  << ", conf=" << conf << ", class=" << class_id << std::endl;
     }
 
     std::cout << "[CUSTOM_PARSER] Threshold: " << detectionParams.perClassPreclusterThreshold[0] << std::endl;
@@ -39,12 +44,17 @@ bool NvDsInferParseCustomONNX(
     // Parse detections
     int parsed_count = 0;
     for (int i = 0; i < NUM_DETECTIONS; i++) {
-        float x = data[i * 6 + 0];
-        float y = data[i * 6 + 1];
-        float w = data[i * 6 + 2];
-        float h = data[i * 6 + 3];
+        // ONNX outputs xyxy format: [x1, y1, x2, y2, conf, class_id]
+        float x1 = data[i * 6 + 0];
+        float y1 = data[i * 6 + 1];
+        float x2 = data[i * 6 + 2];
+        float y2 = data[i * 6 + 3];
         float conf = data[i * 6 + 4];
         int class_id = (int)data[i * 6 + 5];
+
+        // Skip zero/empty detections
+        if (conf < 0.001f)
+            continue;
 
         // Skip low confidence
         if (conf < detectionParams.perClassPreclusterThreshold[0])
@@ -57,10 +67,12 @@ bool NvDsInferParseCustomONNX(
         NvDsInferObjectDetectionInfo obj;
         obj.classId = class_id;
         obj.detectionConfidence = conf;
-        obj.left = x;
-        obj.top = y;
-        obj.width = w;
-        obj.height = h;
+
+        // Convert xyxy → left, top, width, height
+        obj.left = x1;
+        obj.top = y1;
+        obj.width = x2 - x1;
+        obj.height = y2 - y1;
 
         objectList.push_back(obj);
         parsed_count++;

@@ -11,7 +11,7 @@ gie-unique-id=1
 process-mode=1
 
 network-type=0
-cluster-mode=4
+cluster-mode=2
 net-scale-factor=0.003921568627
 offsets=0;0;0
 model-color-format=0
