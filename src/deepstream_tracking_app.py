@@ -17,8 +17,6 @@ _rtp_count = 0
 def depay_sink_probe(pad, info, u_data):
     global _rtp_count
     _rtp_count += 1
-    if _rtp_count % 30 == 0:
-        print(f"[DEPAY] RTP packet #{_rtp_count}")
     return Gst.PadProbeReturn.OK
 
 # ─── Probe: depay src - check if H264 data leaves depay ─────────────────────
@@ -26,8 +24,6 @@ _depay_count = 0
 def depay_src_probe(pad, info, u_data):
     global _depay_count
     _depay_count += 1
-    if _depay_count % 30 == 0:
-        print(f"[DEPAY] H264 packet #{_depay_count}")
     return Gst.PadProbeReturn.OK
 
 # ─── Probe: decoder sink - check if H264 reaches decoder ─────────────────────
@@ -35,8 +31,6 @@ _decoder_sink_count = 0
 def decoder_sink_probe(pad, info, u_data):
     global _decoder_sink_count
     _decoder_sink_count += 1
-    if _decoder_sink_count % 30 == 0:
-        print(f"[DECODER_SINK] H264 nal #{_decoder_sink_count}")
     return Gst.PadProbeReturn.OK
 
 # ─── Probe: decoder src - check if frames reach decoder ──────────────────────
@@ -44,13 +38,10 @@ _frame_count = 0
 def decoder_src_probe(pad, info, u_data):
     global _frame_count
     _frame_count += 1
-    if _frame_count % 30 == 0:  # Print every 30 frames
-        print(f"[DECODER] Frame #{_frame_count}")
     return Gst.PadProbeReturn.OK
 
 # ─── Probe: streammux src - check if frames leave streammux ──────────────────
 def streammux_src_probe(pad, info, u_data):
-    print("[STREAMMUX] Frame pushed to inference!")
     return Gst.PadProbeReturn.OK
 
 # ─── Probe: After inference (pgie src) - check detections ───────────────────
@@ -61,15 +52,13 @@ def pgie_src_probe(pad, info, u_data):
 
     gst_buffer = info.get_buffer()
     if not gst_buffer:
-        print(f"[PGIE] Frame #{_pgie_detected_count}: No GST buffer")
         return Gst.PadProbeReturn.OK
 
     batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
     if not batch_meta:
-        print(f"[PGIE] Frame #{_pgie_detected_count}: No batch meta")
         return Gst.PadProbeReturn.OK
 
-    # Count objects per frame - DON'T iterate objects to avoid crash
+    # Count objects per frame
     num_objects = 0
     l_frame = batch_meta.frame_meta_list
     frame_count = 0
@@ -92,12 +81,11 @@ def pgie_src_probe(pad, info, u_data):
 
     return Gst.PadProbeReturn.OK
 
-# ─── Probe: After tracker - check tracking IDs ──────────────────────────────
+# ─── Probe: After tracker - check tracking IDs (minimal output) ──────────────
 _tracker_check_count = 0
 def tracker_src_probe(pad, info, u_data):
     global _tracker_check_count
     _tracker_check_count += 1
-    print(f"[TRACKER] Frame #{_tracker_check_count}: Reached tracker src probe!")
 
     gst_buffer = info.get_buffer()
     if not gst_buffer:
@@ -115,13 +103,6 @@ def tracker_src_probe(pad, info, u_data):
         l_obj = frame_meta.obj_meta_list
         while l_obj:
             num_objects += 1
-            obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
-            class_name = pgie_classes_str[obj_meta.class_id] \
-                if obj_meta.class_id < len(pgie_classes_str) else "unknown"
-            print(f"[TRACKER] Object #{num_objects}: track_id={obj_meta.object_id}, "
-                  f"class={class_name}, "
-                  f"bbox=({obj_meta.rect_params.left}, {obj_meta.rect_params.top}, "
-                  f"{obj_meta.rect_params.width}x{obj_meta.rect_params.height})")
             try:
                 l_obj = l_obj.next
             except StopIteration:
@@ -131,10 +112,9 @@ def tracker_src_probe(pad, info, u_data):
         except StopIteration:
             break
 
-    if num_objects == 0:
-        print(f"[TRACKER] Frame #{_tracker_check_count}: NO OBJECTS")
-    else:
-        print(f"[TRACKER] Frame #{_tracker_check_count}: Found {num_objects} object(s)")
+    # Print summary every 100 frames
+    if _tracker_check_count % 100 == 0:
+        print(f"[TRACKER] Frame #{_tracker_check_count}: {num_objects} objects")
 
     return Gst.PadProbeReturn.OK
 
@@ -143,7 +123,6 @@ _frame_count_osd = 0
 def osd_sink_pad_buffer_probe(pad, info, u_data):
     global _frame_count_osd
     _frame_count_osd += 1
-    print(f"[OSD] Frame #{_frame_count_osd}")
 
     gst_buffer = info.get_buffer()
     if not gst_buffer:
@@ -179,11 +158,6 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
             rect_height = obj_meta.rect_params.height
             rect_left = obj_meta.rect_params.left
             rect_width = obj_meta.rect_params.width
-
-            # DEBUG: Print bbox values to check normalized vs pixel
-            print(f"[DEBUG] Pixel bbox: left={rect_left}, top={rect_top}, "
-                  f"width={rect_width}, height={rect_height}")
-            print(f"[DEBUG] Frame size: {frame_meta.source_width}x{frame_meta.source_height}")
 
             # For head, position at top of bbox
             if class_name == "head":
@@ -276,13 +250,28 @@ def bus_call(bus, message, loop):
         err, debug = message.parse_warning()
         print(f"[!] WARNING: {err.message}")
     elif msg_type == Gst.MessageType.EOS:
-        print("[*] EOS received")
+        print("[*] EOS received - pipeline will shutdown")
         loop.quit()
-    elif msg_type == Gst.MessageType.STATE_CHANGED:
-        if _pipeline and message.src == _pipeline:
-            old, new, pending = message.parse_state_changed()
-            print(f"[*] Pipeline state changed: {old.value_nick} -> {new.value_nick}")
-    return True
+
+
+# ─── Signal handler for clean shutdown ─────────────────────────────────────────
+_shutdown_requested = False
+_pipeline_ref = None
+
+def _setup_signal_handler(pipeline, loop):
+    """Setup SIGINT handler for graceful shutdown"""
+    import signal
+
+    def sigint_handler(signum, frame):
+        global _shutdown_requested
+        if not _shutdown_requested:
+            _shutdown_requested = True
+            print("\n[*] SIGINT received, sending EOS...")
+            # Send EOS event to pipeline
+            pipeline.send_event(Gst.Event.new_eos())
+            # Don't quit yet - let the loop continue to process EOS
+
+    signal.signal(signal.SIGINT, sigint_handler)
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def main():
@@ -385,8 +374,9 @@ def main():
     # [tracker] – custom BYTETrack tracker properties
     tracker.set_property("high-conf-threshold", 0.5)   # First association threshold
     tracker.set_property("low-conf-threshold", 0.1)    # Second association threshold
-    tracker.set_property("max-time-lost", 30)          # Frames to keep lost track
-    tracker.set_property("iou-threshold", 0.3)         # IoU matching threshold
+    tracker.set_property("max-time-lost", 90)          # 3 seconds at 30fps - keep lost track longer
+    tracker.set_property("min-hits", 30)                 # Require 30 frames (~1 sec) before outputting track
+    tracker.set_property("iou-threshold", 0.2)          # Lower IoU threshold for more matches
     tracker.set_property("frame-width", 1920)          # Input frame width
     tracker.set_property("frame-height", 1080)         # Input frame height
 
@@ -451,8 +441,36 @@ def main():
     osd_sink_pad = nvosd.get_static_pad("sink")
     osd_sink_pad.add_probe(Gst.PadProbeType.BUFFER, osd_sink_pad_buffer_probe, 0)
 
+    # Add probe on encoder sink to check if frames reach encoder
+    encoder_sink_pad = encoder.get_static_pad("sink")
+    _encoder_buffer_count = [0]
+    def encoder_sink_probe(pad, info, u_data):
+        _encoder_buffer_count[0] += 1
+        return Gst.PadProbeReturn.OK
+    if encoder_sink_pad:
+        encoder_sink_pad.add_probe(Gst.PadProbeType.BUFFER, encoder_sink_probe, 0)
+    else:
+        print("[!] Warning: encoder sink pad not found")
+
+    # Add probe on muxer sink (qtmux uses request pads)
+    try:
+        muxer_sink_pad = muxer.get_request_pad("sink_0")
+    except:
+        muxer_sink_pad = muxer.get_static_pad("sink")
+    _muxer_buffer_count = [0]
+    def muxer_sink_probe(pad, info, u_data):
+        _muxer_buffer_count[0] += 1
+        return Gst.PadProbeReturn.OK
+    if muxer_sink_pad:
+        muxer_sink_pad.add_probe(Gst.PadProbeType.BUFFER, muxer_sink_probe, 0)
+    else:
+        print("[!] Warning: muxer sink pad not found")
+
     # ── 6. CHẠY ──────────────────────────────────────────────────────────────
     loop = GLib.MainLoop()
+
+    # Setup SIGINT handler for graceful shutdown
+    _setup_signal_handler(pipeline, loop)
 
     # Add bus handler
     bus = pipeline.get_bus()
@@ -464,23 +482,18 @@ def main():
     print("  Output: /work/src/output.mp4")
     print("Nhấn Ctrl+C để dừng và lưu file.\n")
 
-    try:
-        loop.run()
-    except KeyboardInterrupt:
-        print("\n[*] Đang lưu file...")
+    # Run the main loop
+    loop.run()
 
-        # Send EOS to pipeline
-        pipeline.send_event(Gst.Event.new_eos())
+    # After loop exits, EOS has been received - give encoder/muxer time to drain
+    print("\n[*] EOS received, waiting for encoder/muxer to flush...")
+    import time
+    time.sleep(2)
 
-        # Wait for EOS
-        bus = pipeline.get_bus()
-        msg = bus.timed_pop_filtered(5 * Gst.SECOND, Gst.MessageType.EOS)
+    # Print buffer statistics
+    print(f"[*] Statistics: {_encoder_buffer_count[0]} encoder buffers, {_muxer_buffer_count[0]} muxer buffers")
 
-        if msg:
-            print("[+] Đã đóng file thành công!")
-        else:
-            print("[*] Timeout, file saved.")
-
+    # Now stop the pipeline
     pipeline.set_state(Gst.State.NULL)
     print("[+] Đã lưu file output.mp4 an toàn!")
 

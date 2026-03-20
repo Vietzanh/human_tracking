@@ -10,8 +10,8 @@
 #include <gstnvdsmeta.h>
 #include <nvdsmeta.h>
 
-#include <iostream>
 #include <cstring>
+#include <algorithm>
 
 /* Define PACKAGE for GStreamer - must be before GST_PLUGIN_DEFINE */
 /* Note: PACKAGE must be a valid C identifier (no hyphens) */
@@ -83,6 +83,7 @@ enum {
     PROP_IOU_THRESHOLD,
     PROP_FRAME_WIDTH,
     PROP_FRAME_HEIGHT,
+    PROP_MIN_HITS,
 };
 
 /* Plugin metadata */
@@ -152,6 +153,12 @@ static void gst_custom_tracker_class_init(GstCustomTrackerClass* klass) {
                         "Input frame height",
                         1, 8192, 1080, G_PARAM_READWRITE));
 
+    g_object_class_install_property(
+        gobject_class, PROP_MIN_HITS,
+        g_param_spec_int("min-hits", "Min Hits",
+                        "Minimum frames to confirm a track",
+                        1, 100, 3, G_PARAM_READWRITE));
+
     /* Set pad templates */
     gst_element_class_add_static_pad_template(element_class, &sink_factory);
     gst_element_class_add_static_pad_template(element_class, &src_factory);
@@ -172,16 +179,18 @@ static void gst_custom_tracker_init(GstCustomTracker* tracker) {
     /* Initialize default configuration */
     tracker->config.high_confidence_threshold = 0.5f;
     tracker->config.low_confidence_threshold = 0.1f;
-    tracker->config.max_time_lost = 30;
-    tracker->config.iou_threshold = 0.3f;
+    tracker->config.max_time_lost = 90;
+    tracker->config.min_hits = 3;
+    tracker->config.iou_threshold = 0.2f;
     tracker->config.frame_width = 1920;
     tracker->config.frame_height = 1080;
 
     /* Initialize properties */
     tracker->high_confidence_threshold = 0.5f;
     tracker->low_confidence_threshold = 0.1f;
-    tracker->max_time_lost = 30;
-    tracker->iou_threshold = 0.3f;
+    tracker->max_time_lost = 90;
+    tracker->min_hits = 3;
+    tracker->iou_threshold = 0.2f;
     tracker->width = 1920;
     tracker->height = 1080;
     tracker->fps_n = 30;
@@ -232,6 +241,11 @@ static void gst_custom_tracker_set_property(GObject* object, guint prop_id,
             tracker->config.max_time_lost = g_value_get_int(value);
             GST_DEBUG_OBJECT(tracker, "Max time lost: %d", tracker->max_time_lost);
             break;
+        case PROP_MIN_HITS:
+            tracker->min_hits = g_value_get_int(value);
+            tracker->config.min_hits = g_value_get_int(value);
+            GST_DEBUG_OBJECT(tracker, "Min hits: %d", tracker->min_hits);
+            break;
         case PROP_IOU_THRESHOLD:
             tracker->iou_threshold = g_value_get_float(value);
             tracker->config.iou_threshold = g_value_get_float(value);
@@ -265,6 +279,9 @@ static void gst_custom_tracker_get_property(GObject* object, guint prop_id,
             break;
         case PROP_MAX_TIME_LOST:
             g_value_set_int(value, tracker->max_time_lost);
+            break;
+        case PROP_MIN_HITS:
+            g_value_set_int(value, tracker->min_hits);
             break;
         case PROP_IOU_THRESHOLD:
             g_value_set_float(value, tracker->iou_threshold);
@@ -320,51 +337,30 @@ static std::vector<TrackingObject> extract_detections(GstCustomTracker* tracker,
                                                        NvDsBatchMeta* batch_meta) {
     std::vector<TrackingObject> detections;
 
-    GST_DEBUG_OBJECT(tracker, "[EXTRACT] batch_meta->frame_meta_list = %p",
-                    (void*)batch_meta->frame_meta_list);
-
     NvDsFrameMetaList* frame_meta_list = batch_meta->frame_meta_list;
     if (!frame_meta_list) {
-        GST_DEBUG_OBJECT(tracker, "[EXTRACT] frame_meta_list is NULL!");
         return detections;
     }
 
-    guint frame_count = 0;
+    // Get frame dimensions from tracker (set from caps)
+    guint frame_width = tracker->width;
+    guint frame_height = tracker->height;
+
     for (NvDsFrameMetaList* l_frame = frame_meta_list; l_frame != NULL;
          l_frame = l_frame->next) {
         NvDsFrameMeta* frame_meta = (NvDsFrameMeta*)l_frame->data;
-        frame_count++;
-
-        // Get frame dimensions from tracker (set from caps)
-        guint frame_width = tracker->width;
-        guint frame_height = tracker->height;
-
-        GST_DEBUG_OBJECT(tracker, "[EXTRACT] Frame %u: obj_meta_list = %p",
-                        frame_count, (void*)frame_meta->obj_meta_list);
 
         NvDsObjectMetaList* obj_meta_list = frame_meta->obj_meta_list;
         if (!obj_meta_list) {
             continue;
         }
 
-        guint obj_count = 0;
         for (NvDsObjectMetaList* l_obj = obj_meta_list; l_obj != NULL;
              l_obj = l_obj->next) {
             NvDsObjectMeta* obj_meta = (NvDsObjectMeta*)l_obj->data;
-            obj_count++;
 
-            GST_DEBUG_OBJECT(tracker, "[EXTRACT] Frame %u, Obj %u: class_id=%d, conf=%.3f, rect=(%.1f,%.1f,%.1f,%.1f)",
-                            frame_count, obj_count,
-                            obj_meta->class_id, obj_meta->confidence,
-                            obj_meta->rect_params.left, obj_meta->rect_params.top,
-                            obj_meta->rect_params.width, obj_meta->rect_params.height);
-
-            // Skip objects that are already being tracked (have valid object_id)
-            // DeepStream creates fresh metadata each frame with UNTRACKED_OBJECT_ID
-            // But if for some reason object_id is set, skip it
+            // Skip objects that are already being tracked
             if (obj_meta->object_id != UNTRACKED_OBJECT_ID) {
-                GST_DEBUG_OBJECT(tracker, "[EXTRACT] Frame %u, Obj %u: skipping already tracked (id=%lu)",
-                                frame_count, obj_count, (gulong)obj_meta->object_id);
                 continue;
             }
 
@@ -393,56 +389,108 @@ static std::vector<TrackingObject> extract_detections(GstCustomTracker* tracker,
 
             detections.push_back(det);
         }
-
-        GST_DEBUG_OBJECT(tracker, "[EXTRACT] Frame %u: processed %u objects, total detections so far: %lu",
-                        frame_count, obj_count, (gulong)detections.size());
     }
-
-    GST_DEBUG_OBJECT(tracker, "[EXTRACT] Total: %lu detections from %u frames",
-                    (gulong)detections.size(), frame_count);
 
     return detections;
 }
 
-/* Update DeepStream metadata with tracking results */
+/* Compute IoU between two rectangles (pixel coordinates) */
+static float compute_iou_pixels(float x1a, float y1a, float x2a, float y2a,
+                                float x1b, float y1b, float x2b, float y2b) {
+    // Calculate intersection
+    float inter_x1 = std::max(x1a, x1b);
+    float inter_y1 = std::max(y1a, y1b);
+    float inter_x2 = std::min(x2a, x2b);
+    float inter_y2 = std::min(y2a, y2b);
+
+    // No intersection
+    if (inter_x2 <= inter_x1 || inter_y2 <= inter_y1) {
+        return 0.0f;
+    }
+
+    float inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1);
+    float area_a = (x2a - x1a) * (y2a - y1a);
+    float area_b = (x2b - x1b) * (y2b - y1b);
+    float union_area = area_a + area_b - inter_area;
+
+    if (union_area <= 0) {
+        return 0.0f;
+    }
+
+    return inter_area / union_area;
+}
+
+/* Update DeepStream metadata with tracking results using IoU matching */
 static void update_metadata(GstCustomTracker* tracker,
                             NvDsBatchMeta* batch_meta,
                             const std::vector<TrackingObject>& tracks) {
     guint frame_width = tracker->width;
     guint frame_height = tracker->height;
 
-    GST_DEBUG_OBJECT(tracker, "[UPDATE_META] Processing %lu tracks", (gulong)tracks.size());
-
-    // Directly update metadata using user_data pointer (pointer to NvDsObjectMeta)
-    // This is much more efficient than IoU matching
-    for (const auto& track : tracks) {
-        GST_DEBUG_OBJECT(tracker, "[UPDATE_META] Track: object_id=%d, class_id=%d, conf=%.3f, user_data=%p",
-                        track.object_id, track.class_id, track.confidence, track.user_data);
-
-        if (track.user_data != nullptr) {
-            NvDsObjectMeta* obj_meta = static_cast<NvDsObjectMeta*>(track.user_data);
-
-            GST_DEBUG_OBJECT(tracker, "[UPDATE_META] Assigning track_id=%d to NvDsObjectMeta",
-                            track.object_id);
-
-            // Assign the track ID
-            obj_meta->object_id = track.object_id;
-
-            // Also update the bbox to match the track's smoothed position
-            obj_meta->rect_params.left = track.bbox_x * frame_width;
-            obj_meta->rect_params.top = track.bbox_y * frame_height;
-            obj_meta->rect_params.width = track.bbox_w * frame_width;
-            obj_meta->rect_params.height = track.bbox_h * frame_height;
-
-            GST_DEBUG_OBJECT(tracker, "[UPDATE_META] Updated object_id=%lu to track_id=%d, bbox=(%.2f,%.2f,%.2f,%.2f)",
-                           (gulong)obj_meta->object_id, track.object_id,
-                           track.bbox_x, track.bbox_y, track.bbox_w, track.bbox_h);
-        } else {
-            GST_WARNING_OBJECT(tracker, "[UPDATE_META] Track has NULL user_data! Cannot update metadata.");
-        }
+    if (tracks.empty()) {
+        return;
     }
 
-    GST_DEBUG_OBJECT(tracker, "[UPDATE_META] Done updating %lu tracks", (gulong)tracks.size());
+    // For each frame in the batch, match tracks to NvDsObjectMeta using IoU
+    for (NvDsFrameMetaList* l_frame = batch_meta->frame_meta_list; l_frame != NULL;
+         l_frame = l_frame->next) {
+        NvDsFrameMeta* frame_meta = (NvDsFrameMeta*)l_frame->data;
+
+        // Build list of unmatched object metas from current frame
+        std::vector<NvDsObjectMeta*> unmatched_objs;
+        for (NvDsObjectMetaList* l_obj = frame_meta->obj_meta_list; l_obj != NULL;
+             l_obj = l_obj->next) {
+            NvDsObjectMeta* obj_meta = (NvDsObjectMeta*)l_obj->data;
+            unmatched_objs.push_back(obj_meta);
+        }
+
+        // For each track, find the best matching NvDsObjectMeta using IoU
+        for (const auto& track : tracks) {
+            // Track coordinates (pixel)
+            float track_x1 = track.x1;
+            float track_y1 = track.y1;
+            float track_x2 = track.x2;
+            float track_y2 = track.y2;
+
+            // Find best match among unmatched objects
+            float best_iou = 0.0f;
+            int best_idx = -1;
+
+            for (size_t i = 0; i < unmatched_objs.size(); i++) {
+                NvDsObjectMeta* obj_meta = unmatched_objs[i];
+
+                float obj_x1 = obj_meta->rect_params.left;
+                float obj_y1 = obj_meta->rect_params.top;
+                float obj_x2 = obj_x1 + obj_meta->rect_params.width;
+                float obj_y2 = obj_y1 + obj_meta->rect_params.height;
+
+                float iou = compute_iou_pixels(track_x1, track_y1, track_x2, track_y2,
+                                                obj_x1, obj_y1, obj_x2, obj_y2);
+
+                if (iou > best_iou) {
+                    best_iou = iou;
+                    best_idx = i;
+                }
+            }
+
+            // If found a match with reasonable IoU, update it
+            if (best_idx >= 0 && best_iou > 0.1f) {
+                NvDsObjectMeta* obj_meta = unmatched_objs[best_idx];
+
+                // Assign the track ID
+                obj_meta->object_id = track.object_id;
+
+                // Update bbox to track's smoothed position
+                obj_meta->rect_params.left = track.bbox_x * frame_width;
+                obj_meta->rect_params.top = track.bbox_y * frame_height;
+                obj_meta->rect_params.width = track.bbox_w * frame_width;
+                obj_meta->rect_params.height = track.bbox_h * frame_height;
+
+                // Mark as matched (remove from unmatched list)
+                unmatched_objs.erase(unmatched_objs.begin() + best_idx);
+            }
+        }
+    }
 }
 
 /* Transform IP - main processing function */
@@ -450,53 +498,25 @@ static GstFlowReturn gst_custom_tracker_transform_ip(GstBaseTransform* trans,
                                                       GstBuffer* buffer) {
     GstCustomTracker* tracker = GST_CUSTOM_TRACKER(trans);
 
-    /* Print immediately to stderr - bypasses GST_DEBUG */
-    std::cerr << "[CUSTOM_TRACKER] transform_ip called! frame=" << tracker->frame_count << std::endl;
-
-    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: START transform_ip",
-                    (gulong)tracker->frame_count);
-
-    /* Get metadata from buffer */
-    NvDsBatchMeta* batch_meta = NULL;
-
-    /* Get DeepStream batch metadata - use the correct API for DeepStream 7.0 */
-    batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
-
-    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: batch_meta=%p",
-                    (gulong)tracker->frame_count, (void*)batch_meta);
+    /* Get DeepStream batch metadata */
+    NvDsBatchMeta* batch_meta = gst_buffer_get_nvds_batch_meta(buffer);
 
     if (!batch_meta) {
-        GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: NO batch_meta, returning OK",
-                        (gulong)tracker->frame_count);
         return GST_FLOW_OK;
     }
 
-    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: Extracting detections...",
-                    (gulong)tracker->frame_count);
-
     /* Extract detections */
     std::vector<TrackingObject> detections = extract_detections(tracker, batch_meta);
-
-    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: Extracted %lu detections",
-                    (gulong)tracker->frame_count, (gulong)detections.size());
 
     if (detections.empty()) {
         tracker->frame_count++;
         return GST_FLOW_OK;
     }
 
-    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: Running tracker update...",
-                    (gulong)tracker->frame_count);
-
     /* Run tracker */
     std::vector<TrackingObject> tracks = tracker->tracker->update(detections);
 
-    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: Produced %lu tracks",
-                    (gulong)tracker->frame_count, (gulong)tracks.size());
-
     /* Update metadata with tracking results */
-    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: Updating metadata...",
-                    (gulong)tracker->frame_count);
     update_metadata(tracker, batch_meta, tracks);
 
     /* Update statistics */
@@ -505,9 +525,6 @@ static GstFlowReturn gst_custom_tracker_transform_ip(GstBaseTransform* trans,
         GST_INFO_OBJECT(tracker, "Frame %lu: %lu detections, %lu tracks",
                         (gulong)tracker->frame_count, (gulong)detections.size(), (gulong)tracks.size());
     }
-
-    GST_DEBUG_OBJECT(tracker, "[TRACKER_TRANSFORM] Frame %lu: DONE, returning OK",
-                    (gulong)tracker->frame_count);
 
     return GST_FLOW_OK;
 }

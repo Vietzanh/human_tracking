@@ -32,11 +32,15 @@ GST_INC = /usr/include/gstreamer-1.0
 GST_GLIB_INC = /usr/lib/x86_64-linux-gnu/glib-2.0/include
 GSTREAMER_1.0_GSTCONFIG = /usr/lib/x86_64-linux-gnu/gstreamer-1.0/include/gst
 
+# Eigen3 (header-only library for Kalman filter)
+EIGEN_INC = /usr/include/eigen3
+
 # Include paths
 INCLUDES = -I$(GST_INC) \
            -I$(GST_GLIB_INC) \
            -I/usr/include/glib-2.0 \
            -I$(DS_INC) \
+           -I$(EIGEN_INC) \
            -I.
 
 # Library paths

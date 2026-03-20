@@ -48,6 +48,7 @@ struct _GstCustomTracker {
     gfloat high_confidence_threshold;
     gfloat low_confidence_threshold;
     gint max_time_lost;
+    gint min_hits;
     gfloat iou_threshold;
 };
 

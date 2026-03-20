@@ -18,9 +18,6 @@
  * - Better handling of occlusions and false positives
  */
 
-// Forward declaration
-struct STrack;
-
 /**
  * Configuration for BYTETrack algorithm
  */
@@ -30,11 +27,11 @@ struct TrackerConfig {
     float low_confidence_threshold = 0.1f;     // Then use detections above this
 
     // Track lifecycle
-    int max_time_lost = 30;        // Frames to keep lost track alive (was 30 in paper)
-    int min_hits = 1;              // Frames to confirm a track
+    int max_time_lost = 90;        // 3 seconds at 30fps - keep lost track longer
+    int min_hits = 30;             // Require 30 frames (~1 sec) before outputting track
 
     // IoU matching
-    float iou_threshold = 0.3f;    // IoU threshold for matching
+    float iou_threshold = 0.2f;    // Lower IoU threshold for more matches
 
     // Frame info (set per frame)
     int frame_width = 1920;
@@ -57,32 +54,11 @@ struct TrackingObject {
     float x1, y1, x2, y2;     // Absolute pixel coordinates
 
     // Pointer back to original NvDsObjectMeta (for updating metadata)
-    // This is used by the GStreamer plugin to update the correct metadata
     void* user_data;           // Can store NvDsObjectMeta* or index
 
     TrackingObject() : class_id(0), confidence(0.0f), bbox_x(0), bbox_y(0),
                        bbox_w(0), bbox_h(0), object_id(-1),
                        x1(0), y1(0), x2(0), y2(0), user_data(nullptr) {}
-
-    TrackingObject(int cls, float conf, float x, float y, float w, float h) :
-        class_id(cls), confidence(conf), bbox_x(x), bbox_y(y),
-        bbox_w(w), bbox_h(h), object_id(-1) {
-        // Convert normalized to absolute
-        x1 = x;
-        y1 = y;
-        x2 = x + w;
-        y2 = y + h;
-    }
-
-    // Calculate area
-    float area() const {
-        return bbox_w * bbox_h;
-    }
-
-    // Get center point
-    std::pair<float, float> get_center() const {
-        return {bbox_x + bbox_w / 2.0f, bbox_y + bbox_h / 2.0f};
-    }
 };
 
 /**
@@ -107,11 +83,8 @@ public:
     int hits;                 // Total frames tracked
     int age;                  // Total frames since creation
 
-    // Bounding box (using Kalman filter center/scale representation)
+    // Bounding box (normalized coordinates)
     float x, y, w, h;         // Normalized coordinates
-
-    // For velocity estimation (optional)
-    float vx, vy;
 
     // Frame dimensions (needed for pixel coordinate conversion)
     int frame_width;
@@ -167,11 +140,8 @@ public:
      */
     void set_frame_size(int width, int height);
 
-    // IoU computation between two detections (made public for BYTETrack access)
+    // IoU computation between two detections
     static float compute_iou(const TrackingObject& a, const TrackingObject& b);
-
-    // IoU between detection and track
-    static float compute_iou(const TrackingObject& det, const BYTETrack& track);
 
 private:
     // Configuration
@@ -185,7 +155,7 @@ private:
     // Track ID counter
     int m_next_id;
 
-    // Linear assignment (Hungarian algorithm or greedy)
+    // Linear assignment (greedy IoU matching)
     std::vector<std::pair<int, int>> linear_assignment(
         const std::vector<std::shared_ptr<BYTETrack>>& tracks,
         const std::vector<TrackingObject>& detections,

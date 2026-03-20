@@ -1,0 +1,20 @@
+%YAML:1.0
+#############################################################################
+# DeepStream BYTETracker Config
+#
+# Usage:
+#   In app config: ll-lib-file=/opt/nvidia/deepstream/deepstream-7.0/lib/libnvds_bytetrack.so
+#   In app config: ll-config-file=config_tracker_BYTETracker.yml
+#
+# The BYTETracker library implements the official ByteTrack algorithm:
+#   - Kalman filter for motion prediction
+#   - Hungarian algorithm (LAPJV) for optimal assignment
+#   - Two-stage association: high-score dets first, then low-score dets
+#
+# Tracker library params (set in app config or here):
+#   frame_rate: 30    <- used to compute max_time_lost
+#   track_buffer: 30  <- frames to keep lost tracks (~1 sec at 30fps)
+#############################################################################
+
+BaseConfig:
+  minDetectorConfidence: 0.0
