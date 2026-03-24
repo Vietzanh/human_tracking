@@ -295,7 +295,7 @@ def main():
     queue    = Gst.ElementFactory.make("queue",          "queue")
     streammux= Gst.ElementFactory.make("nvstreammux",    "streammux")
     pgie     = Gst.ElementFactory.make("nvinfer",        "primary-inference")
-    tracker  = Gst.ElementFactory.make("customtracker", "tracker")
+    tracker  = Gst.ElementFactory.make("nvtracker", "tracker")
     nvvidconv= Gst.ElementFactory.make("nvvideoconvert", "nvvidconv")
     nvosd    = Gst.ElementFactory.make("nvdsosd",        "onscreendisplay")
 
@@ -371,14 +371,13 @@ def main():
     # [primary-gie]
     pgie.set_property("config-file-path", "/work/deepstream/pgie_config.txt")
 
-    # [tracker] – custom BYTETrack tracker properties
-    tracker.set_property("high-conf-threshold", 0.5)   # First association threshold
-    tracker.set_property("low-conf-threshold", 0.1)    # Second association threshold
-    tracker.set_property("max-time-lost", 90)          # 3 seconds at 30fps - keep lost track longer
-    tracker.set_property("min-hits", 30)                 # Require 30 frames (~1 sec) before outputting track
-    tracker.set_property("iou-threshold", 0.2)          # Lower IoU threshold for more matches
-    tracker.set_property("frame-width", 1920)          # Input frame width
-    tracker.set_property("frame-height", 1080)         # Input frame height
+    # [tracker] – nvtracker loads BYTETracker library via ll-lib-file
+    tracker.set_property("tracker-width", 1920)
+    tracker.set_property("tracker-height", 1088)
+    tracker.set_property("ll-lib-file",
+                        "/opt/nvidia/deepstream/deepstream-7.0/lib/libnvds_bytetrack.so")
+    tracker.set_property("ll-config-file", "/work/deepstream/config_tracker_BYTETracker.yml")
+    tracker.set_property("gpu-id", 0)
 
     # ── 3. ADD VÀO PIPELINE ─────────────────────────────────────────────────
     for el in required:
@@ -431,8 +430,8 @@ def main():
     streammux_src_pad.add_probe(Gst.PadProbeType.BUFFER, streammux_src_probe, 0)
 
     # ⚠️ TEMPORARILY DISABLED - Comment out PGIE probe to test if it's blocking tracker
-    # pgie_src_pad = pgie.get_static_pad("src")
-    # pgie_src_pad.add_probe(Gst.PadProbeType.BUFFER, pgie_src_probe, 0)
+    pgie_src_pad = pgie.get_static_pad("src")
+    pgie_src_pad.add_probe(Gst.PadProbeType.BUFFER, pgie_src_probe, 0)
 
     # Add probe after tracker to see tracking IDs
     tracker_src_pad = tracker.get_static_pad("src")
@@ -491,7 +490,15 @@ def main():
     time.sleep(2)
 
     # Print buffer statistics
-    print(f"[*] Statistics: {_encoder_buffer_count[0]} encoder buffers, {_muxer_buffer_count[0]} muxer buffers")
+    print(f"[*] Statistics:")
+    print(f"    RTP packets: {_rtp_count}")
+    print(f"    Depay src: {_depay_count}")
+    print(f"    Decoder sink: {_decoder_sink_count}")
+    print(f"    Decoder src (frames): {_frame_count}")
+    print(f"    PGIE buffers: {_pgie_detected_count}")
+    print(f"    Tracker buffers: {_tracker_check_count}")
+    print(f"    Encoder buffers: {_encoder_buffer_count[0]}")
+    print(f"    Muxer buffers: {_muxer_buffer_count[0]}")
 
     # Now stop the pipeline
     pipeline.set_state(Gst.State.NULL)

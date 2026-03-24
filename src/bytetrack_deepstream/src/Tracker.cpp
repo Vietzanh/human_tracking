@@ -10,7 +10,7 @@ NvMOTStatus NvMOT_Query(uint16_t customConfigFilePathSize,
      */
 
     pQuery->computeConfig = NVMOTCOMP_CPU;       // among {NVMOTCOMP_GPU, NVMOTCOMP_CPU}
-    pQuery->numTransforms = 0;                   // 0 for IOU tracker, 1 for NvDCF or DeepSORT tracker as they require the video frames
+    pQuery->numTransforms = 1;                   // 0 for IOU tracker, 1 for NvDCF or DeepSORT tracker as they require the video frames
     pQuery->colorFormats[0] = NVBUF_COLOR_FORMAT_NV12; // among {NVBUF_COLOR_FORMAT_NV12, NVBUF_COLOR_FORMAT_RGBA}
 
     // among {NVBUF_MEM_DEFAULT, NVBUF_MEM_CUDA_DEVICE, NVBUF_MEM_CUDA_UNIFIED, NVBUF_MEM_CUDA_PINNED, ... }
@@ -20,7 +20,7 @@ NvMOTStatus NvMOT_Query(uint16_t customConfigFilePathSize,
     pQuery->memType = NVBUF_MEM_CUDA_DEVICE;
 #endif
 
-    pQuery->batchMode              = NvMOTBatchMode_NonBatch;    // set NvMOTBatchMode_Batch if the low-level tracker supports batch processing mode. Otherwise, NvMOTBatchMode_NonBatch
+    pQuery->batchMode              = NvMOTBatchMode_Batch;    // nvtracker requires batch mode
     pQuery->supportPastFrame       = false;    // set true if the low-level tracker supports the past-frame data or not
 
     /**
